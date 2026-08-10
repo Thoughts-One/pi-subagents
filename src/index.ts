@@ -1086,8 +1086,7 @@ Terse command-style prompts produce shallow, generic work.
       if (resolvedConfig.modelInput) {
         const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
         if (typeof resolved === "string") {
-          if (resolvedConfig.modelFromParams) return textResult(resolved);
-          // config-specified: silent fallback to parent
+          return textResult(resolved);
         } else {
           model = resolved;
         }
@@ -1597,9 +1596,8 @@ Terse command-style prompts produce shallow, generic work.
     const label = getModelLabelFromConfig(cfg.model);
     if (!registry) return label;
     const resolved = resolveModel(cfg.model, registry);
-    // Configured but unresolvable: the runtime silently falls back to the parent
-    // model, so flag it (and the fallback) rather than hiding the config.
-    if (typeof resolved === "string") return `${label} (unavailable, fallback: inherit)`;
+    // Configured but unresolvable: runtime fails closed before creating a child.
+    if (typeof resolved === "string") return `${label} (unavailable, fail closed)`;
     // Surface what it actually resolved to when that differs from the config —
     // e.g. a provider fallback or a looser version pin. Cosmetic separator/date
     // differences are normalized away so an effectively-identical match stays quiet.

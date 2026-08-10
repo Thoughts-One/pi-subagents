@@ -197,6 +197,60 @@ describe("agent-runner final output capture", () => {
     expect(result.responseText).toBe("LOCKED");
   });
 
+  it("rejects an unavailable frontmatter model before creating a child session", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ model: "missing-provider/missing-model" }));
+    const parentModel = { provider: "faux", id: "parent", name: "Parent" };
+    const context = {
+      ...ctx,
+      model: parentModel,
+      modelRegistry: {
+        find: vi.fn(),
+        getAll: vi.fn(() => [parentModel]),
+        getAvailable: vi.fn(() => [parentModel]),
+      },
+    };
+
+    await expect(runAgent(context, "Explore", "go", { pi })).rejects.toThrow(
+      'Model not found: "missing-provider/missing-model"',
+    );
+    expect(defaultResourceLoaderCtor).not.toHaveBeenCalled();
+    expect(createAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("inherits the parent model only when the agent has no configured model", async () => {
+    const { session } = createSession("INHERITED");
+    createAgentSession.mockResolvedValue({ session });
+    const parentModel = { provider: "faux", id: "parent", name: "Parent" };
+    const context = { ...ctx, model: parentModel };
+
+    await runAgent(context, "Explore", "go", { pi });
+
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({ model: parentModel }));
+  });
+
+  it("uses an available configured model instead of the parent", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ model: "faux/configured" }));
+    const { session } = createSession("CONFIGURED");
+    createAgentSession.mockResolvedValue({ session });
+    const parentModel = { provider: "faux", id: "parent", name: "Parent" };
+    const configuredModel = { provider: "faux", id: "configured", name: "Configured" };
+    const context = {
+      ...ctx,
+      model: parentModel,
+      modelRegistry: {
+        find: vi.fn((provider: string, id: string) =>
+          provider === configuredModel.provider && id === configuredModel.id ? configuredModel : undefined
+        ),
+        getAll: vi.fn(() => [parentModel, configuredModel]),
+        getAvailable: vi.fn(() => [parentModel, configuredModel]),
+      },
+    };
+
+    await runAgent(context, "Explore", "go", { pi });
+
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({ model: configuredModel }));
+  });
+
   it("binds extensions before prompting", async () => {
     const { session } = createSession("BOUND");
     createAgentSession.mockResolvedValue({ session });

@@ -295,8 +295,7 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     faux = registerFauxProvider({ provider: "faux", models: [{ id: "faux-1", contextWindow: 200_000 }] });
     model = faux.getModel();
     // Structural faux registry (matches the existing e2e suites): the parent
-    // session uses `model` directly; subagents inherit it via ctx.model since
-    // resolveDefaultModel falls back to the parent model when no model is pinned.
+    // session uses `model` directly; unpinned subagents inherit it via ctx.model.
     modelRegistry = {
       find: () => model,
       getAll: () => [model],

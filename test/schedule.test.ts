@@ -315,6 +315,23 @@ describe("SubagentScheduler — fire path", () => {
     }));
   });
 
+  it("fails closed without spawning when a stored model is unavailable at fire time", () => {
+    const job = scheduler.addJob({
+      name: "missing-model", description: "x", schedule: "+1s",
+      subagent_type: "general-purpose", prompt: "x", model: "missing-provider/missing-model",
+    });
+
+    vi.advanceTimersByTime(2_000);
+
+    expect(manager.spawn).not.toHaveBeenCalled();
+    expect(scheduler.list().find(j => j.id === job.id)?.lastStatus).toBe("error");
+    expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
+      type: "error",
+      jobId: job.id,
+      error: expect.stringContaining('Model not found: "missing-provider/missing-model"'),
+    }));
+  });
+
   it("records lastStatus error and emits when manager.spawn throws", async () => {
     manager.spawn.mockImplementationOnce(() => { throw new Error("no slots"); });
     const job = scheduler.addJob({
