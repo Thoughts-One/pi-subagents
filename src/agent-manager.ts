@@ -13,7 +13,9 @@ import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
-import type { AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
+import { getAgentConfig } from "./agent-types.js";
+import { resolveModel } from "./model-resolver.js";
+import type { AgentInvocation, AgentRecord, IsolationMode, ModelAuthority, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
 
@@ -71,6 +73,8 @@ interface SpawnArgs {
 interface SpawnOptions {
   description: string;
   model?: Model<any>;
+  /** Registry-specific frontmatter authority, including an explicit unpinned result. */
+  modelAuthority?: ModelAuthority;
   maxTurns?: number;
   isolated?: boolean;
   inheritContext?: boolean;
@@ -178,6 +182,15 @@ export class AgentManager {
     // call, not minutes later at drain. Throw (not warn): programmatic callers
     // can fix and retry; the RPC layer converts throws into error envelopes.
     assertValidSpawnCwd(options.cwd);
+    // Reject an unavailable configured pin before creating a record, queueing,
+    // or creating a worktree. Callers carrying a nested registry provide its
+    // authority explicitly; external callers resolve against the global registry.
+    const modelAuthority: ModelAuthority = options.modelAuthority ?? { configuredModel: getAgentConfig(type)?.model };
+    const resolvedModel = modelAuthority.configuredModel
+      ? resolveModel(modelAuthority.configuredModel, ctx.modelRegistry)
+      : options.model ?? ctx.model;
+    if (typeof resolvedModel === "string") throw new Error(resolvedModel);
+    const resolvedOptions: SpawnOptions = { ...options, model: resolvedModel, modelAuthority };
 
     const id = randomUUID().slice(0, 17);
     const abortController = new AbortController();
@@ -205,9 +218,9 @@ export class AgentManager {
     };
     this.agents.set(id, record);
 
-    const args: SpawnArgs = { pi, ctx, type, prompt, options };
+    const args: SpawnArgs = { pi, ctx, type, prompt, options: resolvedOptions };
 
-    if (occupiesPoolSlot(record) && !options.bypassQueue && this.runningBackground >= this.maxConcurrent) {
+    if (occupiesPoolSlot(record) && !resolvedOptions.bypassQueue && this.runningBackground >= this.maxConcurrent) {
       // Queue it — will be started when a running agent completes
       this.queue.push({ id, args });
       return id;
@@ -276,6 +289,7 @@ export class AgentManager {
       pi,
       agentId: id,
       model: options.model,
+      modelAuthority: options.modelAuthority,
       maxTurns: options.maxTurns,
       isolated: options.isolated,
       inheritContext: options.inheritContext,

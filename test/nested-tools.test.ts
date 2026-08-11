@@ -179,6 +179,43 @@ describe("child-safe nested Agent tools", () => {
     }
   });
 
+  it("rejects an unavailable nested frontmatter pin before child creation", async () => {
+    writeAgent("pinned", "model: missing-provider/missing-model\n");
+    registerAgents(loadCustomAgents(cwd));
+    const [agent] = tools();
+
+    const result = await execute(agent, {
+      subagent_type: "pinned",
+      description: "pinned child",
+      prompt: "Do work",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Model not found: "missing-provider/missing-model"');
+    expect(spawn).not.toHaveBeenCalled();
+    expect(spawnAndWait).not.toHaveBeenCalled();
+  });
+
+  it("uses a nested frontmatter pin over a caller-supplied model", async () => {
+    writeAgent("pinned", "model: anthropic/allowed\n");
+    registerAgents(loadCustomAgents(cwd));
+    const [agent] = tools();
+
+    const result = await execute(agent, {
+      subagent_type: "pinned",
+      description: "pinned child",
+      prompt: "Do work",
+      model: "anthropic/blocked",
+    });
+
+    expect(result.isError).toBe(false);
+    expect(spawnAndWait).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(), "pinned", "Do work",
+      expect.objectContaining({ model: { provider: "anthropic", id: "allowed" } }),
+      expect.any(Function),
+    );
+  });
+
   it("applies the scopeModels allowlist to a caller-supplied model", async () => {
     writeFileSync(
       join(cwd, ".pi", "settings.json"),

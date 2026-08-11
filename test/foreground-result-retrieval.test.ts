@@ -58,7 +58,11 @@ function ctx() {
     ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn() },
     cwd: process.cwd(),
     model: undefined,
-    modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
+    modelRegistry: {
+      find: vi.fn(() => ({ provider: "anthropic", id: "claude-haiku-4-5", name: "Haiku" })),
+      getAll: vi.fn(() => [{ provider: "anthropic", id: "claude-haiku-4-5", name: "Haiku" }]),
+      getAvailable: vi.fn(() => [{ provider: "anthropic", id: "claude-haiku-4-5", name: "Haiku" }]),
+    },
     sessionManager: { getSessionId: vi.fn(() => "s1"), getBranch: vi.fn(() => []) },
     getSystemPrompt: vi.fn(() => "parent"),
   } as any;

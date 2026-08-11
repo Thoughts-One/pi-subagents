@@ -193,6 +193,7 @@ beforeEach(() => {
   settingsManagerGetSessionDir.mockReturnValue(undefined);
   settingsManagerCreate.mockClear();
   vi.mocked(createNestedSubagentTools).mockClear();
+  vi.mocked(detectEnv).mockClear();
   loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
   lastSession = undefined;
 });
@@ -205,6 +206,85 @@ describe("agent-runner final output capture", () => {
     const result = await runAgent(ctx, "Explore", "Say LOCKED", { pi });
 
     expect(result.responseText).toBe("LOCKED");
+  });
+
+  it("rejects an unavailable frontmatter model before environment discovery or child creation", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ model: "missing-provider/missing-model" }));
+    const parentModel = { provider: "faux", id: "parent", name: "Parent" };
+    const context = {
+      ...ctx,
+      model: parentModel,
+      modelRegistry: {
+        find: vi.fn(),
+        getAll: vi.fn(() => [parentModel]),
+        getAvailable: vi.fn(() => [parentModel]),
+      },
+    };
+
+    await expect(runAgent(context, "Explore", "go", { pi })).rejects.toThrow(
+      'Model not found: "missing-provider/missing-model"',
+    );
+    expect(detectEnv).not.toHaveBeenCalled();
+    expect(defaultResourceLoaderCtor).not.toHaveBeenCalled();
+    expect(createAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("uses a configured model over an explicit caller model", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ model: "faux/configured" }));
+    const { session } = createSession("CONFIGURED");
+    createAgentSession.mockResolvedValue({ session });
+    const configuredModel = { provider: "faux", id: "configured", name: "Configured" };
+    const callerModel = { provider: "faux", id: "caller", name: "Caller" };
+    const context = {
+      ...ctx,
+      modelRegistry: {
+        find: vi.fn((provider: string, id: string) =>
+          provider === configuredModel.provider && id === configuredModel.id ? configuredModel : undefined,
+        ),
+        getAll: vi.fn(() => [configuredModel, callerModel]),
+        getAvailable: vi.fn(() => [configuredModel, callerModel]),
+      },
+    };
+
+    await runAgent(context, "Explore", "go", { pi, model: callerModel });
+
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({ model: configuredModel }));
+  });
+
+  it("uses an explicit caller model when the agent is unpinned", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    const { session } = createSession("CALLER");
+    createAgentSession.mockResolvedValue({ session });
+    const callerModel = { provider: "faux", id: "caller", name: "Caller" };
+
+    await runAgent({ ...ctx, model: undefined }, "Explore", "go", { pi, model: callerModel });
+
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({ model: callerModel }));
+  });
+
+  it("inherits the parent model only when the agent is unpinned", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    const { session } = createSession("INHERITED");
+    createAgentSession.mockResolvedValue({ session });
+    const parentModel = { provider: "faux", id: "parent", name: "Parent" };
+
+    await runAgent({ ...ctx, model: parentModel }, "Explore", "go", { pi });
+
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({ model: parentModel }));
+  });
+
+  it("keeps an explicitly unpinned nested authority on the parent model", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ model: "faux/configured" }));
+    const { session } = createSession("INHERITED");
+    createAgentSession.mockResolvedValue({ session });
+    const parentModel = { provider: "faux", id: "parent", name: "Parent" };
+
+    await runAgent({ ...ctx, model: parentModel }, "Explore", "go", {
+      pi,
+      modelAuthority: { configuredModel: undefined },
+    });
+
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({ model: parentModel }));
   });
 
   it("binds extensions before prompting", async () => {
@@ -691,6 +771,7 @@ import {
   getConfig,
   getToolNamesForType,
 } from "../src/agent-types.js";
+import { detectEnv } from "../src/env.js";
 import { createNestedSubagentTools } from "../src/nested-tools.js";
 
 const BUILTINS_7 = ["read", "bash", "edit", "write", "grep", "find", "ls"];

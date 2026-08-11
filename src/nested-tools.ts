@@ -31,6 +31,7 @@ import type {
   AgentInvocation,
   AgentRecord,
   IsolationMode,
+  ModelAuthority,
   ThinkingLevel,
 } from "./types.js";
 import { addUsage } from "./usage.js";
@@ -51,6 +52,7 @@ const NESTED_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"] as 
 interface NestedSpawnOptions {
   description: string;
   model?: Model<any>;
+  modelAuthority?: ModelAuthority;
   maxTurns?: number;
   isolated?: boolean;
   inheritContext?: boolean;
@@ -215,12 +217,13 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       }
 
       const config = getAgentConfigIn(registry, resolvedType);
+      const modelAuthority: ModelAuthority = { configuredModel: config?.model };
       const invocation = resolveAgentInvocationConfig(config, params);
       let model = ctx.model;
       if (invocation.modelInput) {
         const resolvedModel = resolveModel(invocation.modelInput, ctx.modelRegistry);
         if (typeof resolvedModel === "string") {
-          if (invocation.modelFromParams) return textResult(resolvedModel, true);
+          return textResult(resolvedModel, true);
         } else {
           model = resolvedModel;
         }
@@ -246,6 +249,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       const options: NestedSpawnOptions = {
         description: params.description,
         model,
+        modelAuthority,
         maxTurns: invocation.maxTurns,
         isolated: invocation.isolated,
         inheritContext: invocation.inheritContext,

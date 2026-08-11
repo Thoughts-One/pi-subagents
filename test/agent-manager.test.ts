@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
+import { registerAgents } from "../src/agent-types.js";
 import type { AgentRecord } from "../src/types.js";
 
 vi.mock("../src/agent-runner.js", () => ({
@@ -673,6 +674,36 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
 
   afterEach(() => {
     manager?.dispose();
+  });
+
+  it("rejects an unavailable configured pin before creating a worktree or record", async () => {
+    const { createWorktree } = await import("../src/worktree.js");
+    registerAgents(new Map([["pinned", {
+      name: "pinned",
+      description: "Pinned",
+      builtinToolNames: ["read"],
+      extensions: false,
+      skills: false,
+      systemPrompt: "Pinned.",
+      promptMode: "replace",
+      model: "missing-provider/missing-model",
+    }]]));
+    manager = new AgentManager();
+    const context = {
+      ...mockCtx,
+      modelRegistry: { find: vi.fn(), getAll: vi.fn(() => []), getAvailable: vi.fn(() => []) },
+    };
+
+    try {
+      expect(() => manager.spawn(mockPi, context, "pinned", "test", {
+        description: "test",
+        isolation: "worktree",
+      })).toThrow('Model not found: "missing-provider/missing-model"');
+      expect(createWorktree).not.toHaveBeenCalled();
+      expect(manager.listAgents()).toEqual([]);
+    } finally {
+      registerAgents(new Map());
+    }
   });
 
   it("spawn() throws when createWorktree returns undefined; no orphan record left behind", async () => {

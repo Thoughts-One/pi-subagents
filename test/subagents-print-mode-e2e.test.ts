@@ -163,6 +163,37 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     expect(toolResults[0]).not.toMatch(/Unknown agent type/i);
   });
 
+  it("fails closed before child execution when a top-level frontmatter model is unavailable", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "subagents-fm-model-"));
+    tmpDirs.push(cwd);
+    mkdirSync(join(cwd, ".pi", "agents"), { recursive: true });
+    writeFileSync(
+      join(cwd, ".pi", "agents", "missing-model.md"),
+      `---\ndescription: "Proves unavailable frontmatter models fail closed."\nmodel: missing-provider/missing-model\n---\nThis prompt must never reach a child.\n`,
+    );
+
+    run = await runPrintMode({
+      prompt: "Delegate to the missing-model agent.",
+      cwd,
+      respond: routeBySession({
+        parentInitial: agentCall({
+          subagent_type: "missing-model",
+          description: "test unavailable pin",
+          prompt: "This must fail before child execution.",
+          run_in_background: false,
+        }),
+        parentFinal: "Failure observed.",
+        subagent: "CHILD_MUST_NOT_RUN",
+      }),
+    });
+
+    const toolResults = agentToolResults(run.parentSession);
+    expect(toolResults).toHaveLength(1);
+    expect(toolResults[0]).toContain('Model not found: "missing-provider/missing-model"');
+    expect(conversationText(run.parentSession)).not.toContain("CHILD_MUST_NOT_RUN");
+    expect(run.modelCalls).toBe(2);
+  });
+
   it("spawns a FRONTMATTER-defined (.agents/agents/*.md) agent and its prompt reaches the child", async () => {
     const MARKER = "SPYMARKER_AGENTS_FRONTMATTER_REACHED_CHILD";
     const cwd = mkdtempSync(join(tmpdir(), "subagents-agents-fm-"));

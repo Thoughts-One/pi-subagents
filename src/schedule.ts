@@ -19,10 +19,10 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Cron } from "croner";
 import { nanoid } from "nanoid";
 import type { AgentManager } from "./agent-manager.js";
-import { resolveSpawnType } from "./agent-types.js";
+import { getAgentConfig, resolveSpawnType } from "./agent-types.js";
 import { resolveModel } from "./model-resolver.js";
 import type { ScheduleStore } from "./schedule-store.js";
-import type { IsolationMode, ScheduledSubagent, SubagentType, ThinkingLevel } from "./types.js";
+import type { IsolationMode, ModelAuthority, ScheduledSubagent, SubagentType, ThinkingLevel } from "./types.js";
 
 /** Event emitted on `pi.events` for cross-extension consumers. */
 export type ScheduleChangeEvent =
@@ -226,32 +226,43 @@ export class SubagentScheduler {
     const job = store.get(id);
     if (!job?.enabled) return;
 
-    store.update(id, { lastStatus: "running" });
-
-    // Resolve model at fire time — registry contents may have changed since the
-    // job was created (auth added/removed). Fall back silently to spawn-default
-    // if resolution fails; the spawn path handles undefined model gracefully.
+    // Resolve dispatch and model authority before marking the job running or
+    // spawning. A pin may have become unavailable since scheduling, and must
+    // never silently become an unpinned run.
+    let dispatch: ReturnType<typeof resolveSpawnType>;
+    let modelAuthority: ModelAuthority;
     let resolvedModel: any | undefined;
-    if (job.model) {
-      const r = resolveModel(job.model, ctx.modelRegistry);
-      if (typeof r !== "string") resolvedModel = r;
-    }
-
-    let agentId: string;
     try {
       // Re-resolve at fire time against the registry as it stands. This does not
       // reload from disk (the scheduler has no reason to rebuild process-global
       // state from a timer), so it catches changes that went through /agents or
-      // an Agent call — not a file deleted directly from a shell. The catch below turns
-      // this into lastStatus: "error" plus an error event, like any other
-      // fire-time failure.
-      const dispatch = resolveSpawnType(job.subagent_type);
+      // an Agent call — not a file deleted directly from a shell.
+      dispatch = resolveSpawnType(job.subagent_type);
       if (!dispatch.ok) throw new Error(dispatch.message);
+      modelAuthority = { configuredModel: getAgentConfig(dispatch.type)?.model };
+      const modelInput = modelAuthority.configuredModel ?? job.model;
+      if (modelInput) {
+        const resolved = resolveModel(modelInput, ctx.modelRegistry);
+        if (typeof resolved === "string") throw new Error(resolved);
+        resolvedModel = resolved;
+      }
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      store.update(id, { lastRun: new Date().toISOString(), lastStatus: "error" });
+      this.emit({ type: "error", jobId: id, error });
+      return;
+    }
+
+    store.update(id, { lastStatus: "running" });
+
+    let agentId: string;
+    try {
       agentId = manager.spawn(pi, ctx, dispatch.type, job.prompt, {
         description: job.description,
         isBackground: true,
         bypassQueue: true,
         model: resolvedModel,
+        modelAuthority,
         maxTurns: job.max_turns,
         isolated: job.isolated,
         thinkingLevel: job.thinking,

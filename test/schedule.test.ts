@@ -295,6 +295,35 @@ describe("SubagentScheduler — fire path", () => {
     );
   });
 
+  it("fails closed before marking running or spawning when a configured pin is unavailable", () => {
+    registerAgents(new Map([["pinned", {
+      name: "pinned",
+      description: "Pinned",
+      builtinToolNames: ["read"],
+      extensions: false,
+      skills: false,
+      systemPrompt: "Pinned.",
+      promptMode: "replace",
+      model: "missing-provider/missing-model",
+    }]]));
+    const job = scheduler.addJob({
+      name: "missing-model", description: "x", schedule: "+1s",
+      subagent_type: "pinned", prompt: "x",
+    });
+    const update = vi.spyOn(store, "update");
+
+    vi.advanceTimersByTime(2_000);
+
+    expect(manager.spawn).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalledWith(job.id, { lastStatus: "running" });
+    expect(scheduler.list().find(j => j.id === job.id)?.lastStatus).toBe("error");
+    expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
+      type: "error",
+      jobId: job.id,
+      error: expect.stringContaining('Model not found: "missing-provider/missing-model"'),
+    }));
+  });
+
   it("one-shot fires once and auto-disables", async () => {
     const job = scheduler.addJob({
       name: "soon", description: "once", schedule: "+1s",

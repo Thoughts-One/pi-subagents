@@ -147,6 +147,11 @@ export interface AgentRecord {
   rootSessionId?: string;
 }
 
+/** Resolved model configuration from the registry that authorized a spawn. */
+export interface ModelAuthority {
+  configuredModel: string | undefined;
+}
+
 export interface AgentInvocation {
   /** Short display name, e.g. "haiku" — only set when different from parent. */
   modelName?: string;

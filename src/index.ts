@@ -481,6 +481,7 @@ export default function (pi: ExtensionAPI) {
     delete safeOptions.depth;
     delete safeOptions.maxSubagentDepth;
     delete safeOptions.configCwd;
+    delete safeOptions.modelAuthority;
     // Also internal: it names a transcript directory, so a forged value would
     // be a path-traversal primitive.
     delete safeOptions.rootSessionId;
@@ -1090,14 +1091,14 @@ Terse command-style prompts produce shallow, generic work.
       const customConfig = getAgentConfig(subagentType);
 
       const resolvedConfig = resolveAgentInvocationConfig(customConfig, params);
+      const modelAuthority = { configuredModel: customConfig?.model };
 
       // Resolve model from agent config first; tool-call params only fill gaps.
       let model = ctx.model;
       if (resolvedConfig.modelInput) {
         const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
         if (typeof resolved === "string") {
-          if (resolvedConfig.modelFromParams) return textResult(resolved);
-          // config-specified: silent fallback to parent
+          return textResult(resolved);
         } else {
           model = resolved;
         }
@@ -1189,7 +1190,7 @@ Terse command-style prompts produce shallow, generic work.
             // at fire time, and the original is what a user edits.
             subagent_type: requestedType,
             prompt: params.prompt as string,
-            model: params.model as string | undefined,
+            model: resolvedConfig.modelInput,
             thinking: thinking,
             max_turns: effectiveMaxTurns,
             isolated: isolated,
@@ -1251,6 +1252,7 @@ Terse command-style prompts produce shallow, generic work.
           id = manager.spawn(pi, ctx, subagentType, params.prompt, {
             description: params.description,
             model,
+            modelAuthority,
             maxTurns: effectiveMaxTurns,
             isolated,
             inheritContext,
@@ -1378,6 +1380,7 @@ Terse command-style prompts produce shallow, generic work.
         const fgResult = await manager.spawnAndWait(pi, ctx, subagentType, params.prompt, {
           description: params.description,
           model,
+          modelAuthority,
           maxTurns: effectiveMaxTurns,
           isolated,
           inheritContext,
@@ -1590,9 +1593,8 @@ Terse command-style prompts produce shallow, generic work.
     const label = getModelLabelFromConfig(cfg.model);
     if (!registry) return label;
     const resolved = resolveModel(cfg.model, registry);
-    // Configured but unresolvable: the runtime silently falls back to the parent
-    // model, so flag it (and the fallback) rather than hiding the config.
-    if (typeof resolved === "string") return `${label} (unavailable, fallback: inherit)`;
+    // Configured but unresolvable: runtime fails closed before creating a child.
+    if (typeof resolved === "string") return `${label} (unavailable, fail closed)`;
     // Surface what it actually resolved to when that differs from the config —
     // e.g. a provider fallback or a looser version pin. Cosmetic separator/date
     // differences are normalized away so an effectively-identical match stays quiet.

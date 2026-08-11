@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Configured agent model pins now fail closed instead of silently inheriting another model.** A frontmatter `model:` that cannot resolve is rejected before an agent record, queue entry, worktree, environment probe, extension load, scheduler running-state mutation, or child session is created. The same authority now reaches direct, background, scheduled, print-mode, manager/RPC, and nested spawns; config-over-caller precedence remains unchanged, while only genuinely unpinned agents inherit an explicit caller model or the parent model. Scheduler fires re-resolve current frontmatter authority before using their stored model snapshot, and `/agents` labels unavailable pins as fail-closed rather than fallback-inherit.
+
 ## [0.15.0] - 2026-08-10
 
 ### Added
