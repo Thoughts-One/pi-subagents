@@ -197,6 +197,9 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       // Reloaded per call so new agent files are picked up without a restart.
       const registry = loadRegistry();
       const rawType = params.subagent_type;
+      if (rawType.trim().toLowerCase() === "documentation-auditor") {
+        return textResult("documentation-auditor can only be started through audit_documents.", true);
+      }
       // Strict resolve, never the fallback policy: a project-level
       // `fallbackSubagent` must not hand a nested caller an agent its allowlist
       // never named. The list stays allowlist-filtered so a typo can't enumerate

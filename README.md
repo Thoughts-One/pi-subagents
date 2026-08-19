@@ -313,6 +313,14 @@ Launch a sub-agent.
 | `isolation` | `"worktree"` | no | Run in an isolated git worktree |
 | `inherit_context` | boolean | no | Fork parent conversation into agent |
 
+### `audit_documents`
+
+Start one `documentation-auditor` from a validated finite audit request. This is the only fresh route for that role; generic `Agent`, RPC, nested tools, and schedules reject fresh dispatch. Resume is limited to a still-live record that began through this tool; a completed `INPUT_REQUIRED` gate requires a fresh call.
+
+Required fields: `description` (3–5 words), `objective`, exact absolute readable regular-file `manifest` paths, canonical readable `authority_roots`, `labels` (`name`, `definition`), `precedence` (`"none"` or ordered authorities), `disposition_rules` (`artifact_type`, `rule`), and parent-produced `reference_evidence`. Evidence covers every manifest artifact exactly once and supplies either an existing readable `file:line` hit inside an authority root or one `zero-hit: <parent observation>` value. `run_in_background` is the only optional execution field.
+
+The tool canonicalizes paths, rejects aliases and root escapes, and renders a deterministic brief. Invalid input creates no child record, queue entry, session, transcript, or schedule. Valid foreground calls return the auditor result inline; valid background calls return an agent ID and use normal completion notifications.
+
 ### `get_subagent_result`
 
 Check status and retrieve results from a background agent.

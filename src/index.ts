@@ -12,6 +12,7 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
+import type { Model } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
@@ -22,6 +23,7 @@ import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, get
 import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
+import { prepareDocumentationAudit } from "./documentation-audit.js";
 import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
@@ -32,7 +34,7 @@ import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
-import { type AgentConfig, type AgentInvocation, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type WidgetMode } from "./types.js";
+import { type AgentConfig, type AgentInvocation, type AgentRecord, type DocumentationAuditAdmission, type JoinMode, type NotificationDetails, type SubagentType, type WidgetMode } from "./types.js";
 import {
   type AgentActivity,
   type AgentDetails,
@@ -482,6 +484,9 @@ export default function (pi: ExtensionAPI) {
     delete safeOptions.maxSubagentDepth;
     delete safeOptions.configCwd;
     delete safeOptions.modelAuthority;
+    // Only audit_documents issues this unforgeable admission. A registry caller
+    // must not be able to replay one it observed on a completed record.
+    delete safeOptions.documentationAuditAdmission;
     // Also internal: it names a transcript directory, so a forged value would
     // be a path-traversal primitive.
     delete safeOptions.rootSessionId;
@@ -491,6 +496,9 @@ export default function (pi: ExtensionAPI) {
     // envelopes at the RPC boundary. Reload first so an agent file added mid
     // session is spawnable here too, not only through the Agent tool.
     reloadCustomAgents();
+    if (type.trim().toLowerCase() === "documentation-auditor") {
+      throw new Error("documentation-auditor can only be started through audit_documents.");
+    }
     const dispatch = resolveSpawnType(type);
     if (!dispatch.ok) throw new Error(dispatch.message);
     return manager.spawn(piRef, ctxRef, dispatch.type, prompt, safeOptions);
@@ -766,6 +774,220 @@ export default function (pi: ExtensionAPI) {
     },
     (event, payload) => pi.events.emit(event, payload),
   );
+
+  /** Resolve the fixed configuration shared by every supported fresh spawn. */
+  function prepareFreshSpawn(
+    ctx: ExtensionContext,
+    type: SubagentType,
+    config: AgentConfig | undefined,
+    params: Record<string, unknown>,
+  ):
+    | { error: string }
+    | {
+      invocation: ReturnType<typeof resolveAgentInvocationConfig>;
+      model: Model<any> | undefined;
+      modelAuthority: { configuredModel: string | undefined };
+      effectiveMaxTurns: number | undefined;
+    } {
+    const invocation = resolveAgentInvocationConfig(config, params);
+    let model = ctx.model;
+    if (invocation.modelInput) {
+      const resolved = resolveModel(invocation.modelInput, ctx.modelRegistry);
+      if (typeof resolved === "string") return { error: resolved };
+      model = resolved;
+    }
+    const scopeVerdict = checkModelScope({
+      model,
+      cwd: ctx.cwd,
+      modelRegistry: ctx.modelRegistry,
+      callerSupplied: invocation.modelFromParams,
+      agentLabel: config?.displayName ?? type,
+      modelInput: invocation.modelInput,
+    });
+    if (scopeVerdict.kind === "error") return { error: scopeVerdict.message };
+    if (scopeVerdict.kind === "warn") ctx.ui.notify(scopeVerdict.message, "warning");
+    return {
+      invocation,
+      model,
+      modelAuthority: { configuredModel: config?.model },
+      effectiveMaxTurns: normalizeMaxTurns(invocation.maxTurns ?? getDefaultMaxTurns()),
+    };
+  }
+
+  /**
+   * Own the minimum fresh-spawn/join lifecycle shared by Agent and
+   * audit_documents. Role-specific callers only add presentation callbacks.
+   */
+  async function startPreparedFreshSpawn(
+    ctx: ExtensionContext,
+    type: SubagentType,
+    prompt: string,
+    description: string,
+    config: AgentConfig | undefined,
+    prepared: Exclude<ReturnType<typeof prepareFreshSpawn>, { error: string }>,
+    callbacks: Partial<ReturnType<typeof createActivityTracker>["callbacks"]> = {},
+    signal?: AbortSignal,
+    invocationOverride?: AgentInvocation,
+    documentationAuditAdmission?: DocumentationAuditAdmission,
+  ): Promise<{ id: string; record: AgentRecord; isBackground: boolean }> {
+    let id: string | undefined;
+    const outputTranscript = config?.outputTranscript ?? getOutputTranscriptDefault();
+    const attachTranscript = (agentId: string): void => {
+      if (!outputTranscript) return;
+      const record = manager.getRecord(agentId);
+      if (!record) return;
+      record.outputFile = createOutputFilePath(ctx.cwd, agentId, ctx.sessionManager.getSessionId());
+      writeInitialEntry(record.outputFile, agentId, prompt, ctx.cwd);
+    };
+    const onSessionCreated = (session: Parameters<NonNullable<typeof callbacks.onSessionCreated>>[0]): void => {
+      if (id) {
+        const record = manager.getRecord(id);
+        if (record?.outputFile) record.outputCleanup = streamToOutputFile(session, record.outputFile, id, ctx.cwd);
+      }
+      callbacks.onSessionCreated?.(session);
+    };
+    const options = {
+      description,
+      model: prepared.model,
+      modelAuthority: prepared.modelAuthority,
+      maxTurns: prepared.effectiveMaxTurns,
+      isolated: prepared.invocation.isolated,
+      inheritContext: prepared.invocation.inheritContext,
+      thinkingLevel: prepared.invocation.thinking,
+      isolation: prepared.invocation.isolation,
+      invocation: invocationOverride ?? {
+        thinking: prepared.invocation.thinking,
+        maxTurns: normalizeMaxTurns(prepared.invocation.maxTurns),
+        isolated: prepared.invocation.isolated,
+        inheritContext: prepared.invocation.inheritContext,
+        runInBackground: prepared.invocation.runInBackground,
+        isolation: prepared.invocation.isolation,
+      },
+      rootSessionId: ctx.sessionManager.getSessionId(),
+      documentationAuditAdmission,
+      ...callbacks,
+      onSessionCreated,
+    };
+    if (prepared.invocation.runInBackground) {
+      id = manager.spawn(pi, ctx, type, prompt, { ...options, isBackground: true });
+      attachTranscript(id);
+      const record = manager.getRecord(id)!;
+      return { id, record, isBackground: true };
+    }
+    const result = await manager.spawnAndWait(pi, ctx, type, prompt, { ...options, signal }, (agentId) => {
+      id = agentId;
+      attachTranscript(agentId);
+    });
+    return { ...result, isBackground: false };
+  }
+
+  function registerBackgroundLifecycle(
+    id: string,
+    record: AgentRecord,
+    toolCallId: string,
+    type: SubagentType,
+    description: string,
+    state: ReturnType<typeof createActivityTracker>["state"],
+  ): void {
+    const joinMode = resolveJoinMode(defaultJoinMode, true);
+    if (joinMode) {
+      record.joinMode = joinMode;
+      record.toolCallId = toolCallId;
+    }
+    if (joinMode !== undefined && joinMode !== "async") {
+      currentBatchAgents.push({ id, joinMode });
+      if (batchFinalizeTimer) clearTimeout(batchFinalizeTimer);
+      batchFinalizeTimer = setTimeout(finalizeBatch, 100);
+    }
+    agentActivity.set(id, state);
+    widget.ensureTimer();
+    widget.update();
+    fleet.ensureTimer();
+    fleet.update();
+    pi.events.emit("subagents:created", { id, type, description, isBackground: true });
+  }
+
+  // ---- Typed documentation audit tool ----
+
+  pi.registerTool(defineTool({
+    name: "audit_documents",
+    label: "Audit Documents",
+    description: "Audit a finite documentation manifest through the documentation-auditor role.",
+    promptSnippet: "Audit a finite documentation manifest",
+    parameters: Type.Object({
+      description: Type.String({ description: "Three to five word UI label." }),
+      objective: Type.String({ description: "Non-empty documentation audit objective." }),
+      manifest: Type.Array(Type.String({ description: "Exact absolute readable artifact path." }), { minItems: 1, maxItems: 32 }),
+      authority_roots: Type.Array(Type.String({ description: "Canonical authority directory." }), { minItems: 1, maxItems: 32 }),
+      labels: Type.Array(Type.Object({
+        name: Type.String(),
+        definition: Type.String(),
+      }), { minItems: 1, maxItems: 32 }),
+      precedence: Type.Union([
+        Type.Literal("none"),
+        Type.Array(Type.String(), { minItems: 1, maxItems: 32 }),
+      ]),
+      disposition_rules: Type.Array(Type.Object({
+        artifact_type: Type.String(),
+        rule: Type.String(),
+      }), { minItems: 1, maxItems: 32 }),
+      reference_evidence: Type.Array(Type.Object({
+        artifact: Type.String(),
+        references: Type.Array(Type.String(), { minItems: 1, maxItems: 64 }),
+      }), { minItems: 1, maxItems: 32 }),
+      run_in_background: Type.Optional(Type.Boolean({ description: "Run this valid audit in the background." })),
+    }),
+    execute: async (toolCallId, params, signal, _onUpdate, ctx) => {
+      const prepared = prepareDocumentationAudit(params);
+      if ("error" in prepared) return textResult(prepared.error);
+
+      reloadCustomAgents();
+      const type = resolveType("documentation-auditor");
+      const config = type === undefined ? undefined : getAgentConfig(type);
+      if (type === undefined || config === undefined || config.enabled === false) {
+        return textResult("audit_documents requires an enabled documentation-auditor role.");
+      }
+      const fresh = prepareFreshSpawn(ctx, type, config, {
+        run_in_background: prepared.request.run_in_background,
+      });
+      if ("error" in fresh) return textResult(fresh.error);
+      const backgroundActivity = fresh.invocation.runInBackground
+        ? createActivityTracker(fresh.effectiveMaxTurns)
+        : undefined;
+
+      try {
+        const started = await startPreparedFreshSpawn(
+          ctx,
+          type,
+          prepared.prompt,
+          prepared.request.description,
+          config,
+          fresh,
+          backgroundActivity?.callbacks,
+          signal,
+          undefined,
+          prepared.admission,
+        );
+        if (started.isBackground) {
+          registerBackgroundLifecycle(
+            started.id,
+            started.record,
+            toolCallId,
+            type,
+            prepared.request.description,
+            backgroundActivity!.state,
+          );
+          return textResult(`Documentation audit started in background.\nAgent ID: ${started.id}`);
+        }
+        if (started.record.status === "error") {
+          return textResult(`Documentation audit failed: ${started.record.error}${partialOutputSuffix(started.record)}`);
+        }
+        return textResult(started.record.result?.trim() || "No output.");
+      } catch (err) {
+        return textResult(err instanceof Error ? err.message : String(err));
+      }
+    },
+  }));
 
   // ---- Agent tool ----
 
@@ -1060,6 +1282,9 @@ Terse command-style prompts produce shallow, generic work.
       reloadCustomAgents();
 
       const rawType = params.subagent_type as SubagentType;
+      if (!params.resume && rawType.trim().toLowerCase() === "documentation-auditor") {
+        return textResult("documentation-auditor can only be started through audit_documents.");
+      }
       // Single decision point for dispatch (#183): unknown, disabled and
       // case-ambiguous types are refused here, BEFORE anything spawns, so a
       // background or scheduled call can't start running the wrong agent while
@@ -1090,57 +1315,20 @@ Terse command-style prompts produce shallow, generic work.
       // Get agent config (if any)
       const customConfig = getAgentConfig(subagentType);
 
-      const resolvedConfig = resolveAgentInvocationConfig(customConfig, params);
-      const modelAuthority = { configuredModel: customConfig?.model };
-
-      // Resolve model from agent config first; tool-call params only fill gaps.
-      let model = ctx.model;
-      if (resolvedConfig.modelInput) {
-        const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
-        if (typeof resolved === "string") {
-          return textResult(resolved);
-        } else {
-          model = resolved;
-        }
-      }
-
-      // Scope validation: the effective resolved model is checked against the
-      // user's enabledModels list. Policy (hard error vs warn-and-proceed) lives
-      // in model-scope.ts so the nested delegation tools apply the same rule.
-      const scopeVerdict = checkModelScope({
-        model,
-        cwd: ctx.cwd,
-        modelRegistry: ctx.modelRegistry,
-        callerSupplied: resolvedConfig.modelFromParams,
-        agentLabel: customConfig?.displayName ?? subagentType,
-        modelInput: resolvedConfig.modelInput,
-      });
-      if (scopeVerdict.kind === "error") return textResult(scopeVerdict.message);
-      if (scopeVerdict.kind === "warn") ctx.ui.notify(scopeVerdict.message, "warning");
-
+      const fresh = prepareFreshSpawn(ctx, subagentType, customConfig, params);
+      if ("error" in fresh) return textResult(fresh.error);
+      const { invocation: resolvedConfig, model, effectiveMaxTurns } = fresh;
       const thinking = resolvedConfig.thinking;
       const inheritContext = resolvedConfig.inheritContext;
       const runInBackground = resolvedConfig.runInBackground;
       const isolated = resolvedConfig.isolated;
       const isolation = resolvedConfig.isolation;
-      // Whether this spawn writes its .output transcript. Per-agent
-      // frontmatter (`output_transcript`) wins; otherwise the project/global
-      // default applies. `attachTranscript` below is the SOLE gate — every
-      // downstream consumer keys off record.outputFile being set, so no spawn
-      // path can re-enable the transcript by accident.
-      const outputTranscript = customConfig?.outputTranscript ?? getOutputTranscriptDefault();
-      const attachTranscript = (rec: AgentRecord | undefined, agentId: string): void => {
-        if (!rec || !outputTranscript) return;
-        rec.outputFile = createOutputFilePath(ctx.cwd, agentId, ctx.sessionManager.getSessionId());
-        writeInitialEntry(rec.outputFile, agentId, params.prompt, ctx.cwd);
-      };
 
       const parentModelId = ctx.model?.id;
       const effectiveModelId = model?.id;
       const modelName = effectiveModelId && effectiveModelId !== parentModelId
         ? (model?.name ?? effectiveModelId).replace(/^Claude\s+/i, "").toLowerCase()
         : undefined;
-      const effectiveMaxTurns = normalizeMaxTurns(resolvedConfig.maxTurns ?? getDefaultMaxTurns());
       const agentInvocation: AgentInvocation = {
         modelName,
         thinking,
@@ -1216,7 +1404,12 @@ Terse command-style prompts produce shallow, generic work.
         if (!existing.session) {
           return textResult(`Agent "${params.resume}" has no active session to resume.`);
         }
-        const record = await manager.resume(params.resume, params.prompt, signal);
+        let record: AgentRecord | undefined;
+        try {
+          record = await manager.resume(params.resume, params.prompt, signal);
+        } catch (err) {
+          return textResult(err instanceof Error ? err.message : String(err));
+        }
         if (!record) {
           return textResult(`Failed to resume agent "${params.resume}".`);
         }
@@ -1235,74 +1428,29 @@ Terse command-style prompts produce shallow, generic work.
       if (runInBackground) {
         const { state: bgState, callbacks: bgCallbacks } = createActivityTracker(effectiveMaxTurns);
 
-        // Wrap onSessionCreated to wire output file streaming.
-        // The callback lazily reads record.outputFile (set right after spawn)
-        // rather than closing over a value that doesn't exist yet.
         let id: string;
-        const origBgOnSession = bgCallbacks.onSessionCreated;
-        bgCallbacks.onSessionCreated = (session: any) => {
-          origBgOnSession(session);
-          const rec = manager.getRecord(id);
-          if (rec?.outputFile) {
-            rec.outputCleanup = streamToOutputFile(session, rec.outputFile, id, ctx.cwd);
-          }
-        };
-
+        let record: AgentRecord;
         try {
-          id = manager.spawn(pi, ctx, subagentType, params.prompt, {
-            description: params.description,
-            model,
-            modelAuthority,
-            maxTurns: effectiveMaxTurns,
-            isolated,
-            inheritContext,
-            thinkingLevel: thinking,
-            isBackground: true,
-            isolation,
-            invocation: agentInvocation,
-            rootSessionId: ctx.sessionManager.getSessionId(),
-            ...bgCallbacks,
-          });
+          const started = await startPreparedFreshSpawn(
+            ctx,
+            subagentType,
+            params.prompt,
+            params.description,
+            customConfig,
+            fresh,
+            bgCallbacks,
+            undefined,
+            agentInvocation,
+          );
+          id = started.id;
+          record = started.record;
         } catch (err) {
           return textResult(err instanceof Error ? err.message : String(err));
         }
 
-        // Set output file + join mode synchronously after spawn, before the
-        // event loop yields — onSessionCreated is async so this is safe.
-        const joinMode = resolveJoinMode(defaultJoinMode, true);
-        const record = manager.getRecord(id);
-        if (record && joinMode) {
-          record.joinMode = joinMode;
-          record.toolCallId = toolCallId;
-          attachTranscript(record, id);
-        }
+        registerBackgroundLifecycle(id, record, toolCallId, subagentType, params.description, bgState);
 
-        if (joinMode == null || joinMode === 'async') {
-          // Foreground/no join mode or explicit async — not part of any batch
-        } else {
-          // smart or group — add to current batch
-          currentBatchAgents.push({ id, joinMode });
-          // Debounce: reset timer on each new agent so parallel tool calls
-          // dispatched across multiple event loop ticks are captured together
-          if (batchFinalizeTimer) clearTimeout(batchFinalizeTimer);
-          batchFinalizeTimer = setTimeout(finalizeBatch, 100);
-        }
-
-        agentActivity.set(id, bgState);
-        widget.ensureTimer();
-        widget.update();
-        fleet.ensureTimer();
-        fleet.update();
-
-        // Emit created event
-        pi.events.emit("subagents:created", {
-          id,
-          type: subagentType,
-          description: params.description,
-          isBackground: true,
-        });
-
-        const isQueued = record?.status === "queued";
+        const isQueued = record.status === "queued";
         return textResult(
           `${fallbackNote}Agent ${isQueued ? "queued" : "started"} in background.\n` +
           `Agent ID: ${id}\n` +
@@ -1342,9 +1490,8 @@ Terse command-style prompts produce shallow, generic work.
 
       const { state: fgState, callbacks: fgCallbacks } = createActivityTracker(effectiveMaxTurns, streamUpdate);
 
-      // Wire session creation: register in widget + stream to output file.
-      // The output file path is set synchronously after spawn (below),
-      // before onSessionCreated fires — same pattern as background agents.
+      // The shared fresh-spawn operation attaches the transcript before this
+      // callback runs. This caller only owns its foreground presentation state.
       const origOnSession = fgCallbacks.onSessionCreated;
       fgCallbacks.onSessionCreated = (session: any) => {
         origOnSession(session);
@@ -1356,13 +1503,6 @@ Terse command-style prompts produce shallow, generic work.
             fleet.ensureTimer();
             fleet.update();
             break;
-          }
-        }
-        // Stream conversation to output file (foreground agent logging)
-        if (fgId) {
-          const rec = manager.getRecord(fgId);
-          if (rec?.outputFile) {
-            rec.outputCleanup = streamToOutputFile(session, rec.outputFile, fgId, ctx.cwd);
           }
         }
       };
@@ -1377,25 +1517,17 @@ Terse command-style prompts produce shallow, generic work.
 
       let record: AgentRecord;
       try {
-        const fgResult = await manager.spawnAndWait(pi, ctx, subagentType, params.prompt, {
-          description: params.description,
-          model,
-          modelAuthority,
-          maxTurns: effectiveMaxTurns,
-          isolated,
-          inheritContext,
-          thinkingLevel: thinking,
-          isolation,
-          invocation: agentInvocation,
+        const fgResult = await startPreparedFreshSpawn(
+          ctx,
+          subagentType,
+          params.prompt,
+          params.description,
+          customConfig,
+          fresh,
+          fgCallbacks,
           signal,
-          rootSessionId: ctx.sessionManager.getSessionId(),
-          ...fgCallbacks,
-        }, (fgAgentId) => {
-          // onSpawned: called synchronously after spawn, before onSessionCreated fires.
-          // Set up the output file so streamToOutputFile can pick it up.
-          const fgRec = manager.getRecord(fgAgentId);
-          attachTranscript(fgRec, fgAgentId);
-        });
+          agentInvocation,
+        );
         record = fgResult.record;
       } catch (err) {
         clearInterval(spinnerInterval);

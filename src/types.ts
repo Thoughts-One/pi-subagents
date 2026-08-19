@@ -74,6 +74,44 @@ export interface AgentConfig {
 
 export type JoinMode = 'async' | 'group' | 'smart';
 
+export interface DocumentationAuditLabel {
+  name: string;
+  definition: string;
+}
+
+export interface DocumentationAuditDispositionRule {
+  artifact_type: string;
+  rule: string;
+}
+
+export interface ReferenceEvidence {
+  artifact: string;
+  references: string[];
+}
+
+/** Typed input accepted only by the audit_documents tool. */
+export interface DocumentationAuditRequest {
+  description: string;
+  objective: string;
+  manifest: string[];
+  authority_roots: string[];
+  labels: DocumentationAuditLabel[];
+  precedence: "none" | string[];
+  disposition_rules: DocumentationAuditDispositionRule[];
+  reference_evidence: ReferenceEvidence[];
+  run_in_background?: boolean;
+}
+
+export type DocumentationAuditResult =
+  | { request: DocumentationAuditRequest; prompt: string; admission: DocumentationAuditAdmission }
+  | { error: string };
+
+/** Opaque manager admission for an audit_documents-originated invocation. */
+export interface DocumentationAuditAdmission {
+  route: "audit_documents";
+  token: object;
+}
+
 /**
  * Display mode for the persistent above-editor agent widget.
  * - `all`: show every agent (foreground + background).
@@ -145,6 +183,8 @@ export interface AgentRecord {
    * directory as their ancestors' instead of the child session's own id.
    */
   rootSessionId?: string;
+  /** Typed admission retained for documentation-auditor resume checks. */
+  documentationAuditAdmission?: DocumentationAuditAdmission;
 }
 
 /** Resolved model configuration from the registry that authorized a spawn. */

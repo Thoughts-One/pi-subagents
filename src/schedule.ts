@@ -115,6 +115,9 @@ export class SubagentScheduler {
 
   /** Add a job, persist, and arm if enabled. Returns the stored job. */
   addJob(input: NewJobInput): ScheduledSubagent {
+    if (input.subagent_type.trim().toLowerCase() === "documentation-auditor") {
+      throw new Error("documentation-auditor can only be started through audit_documents.");
+    }
     const store = this.requireStore();
     if (store.hasName(input.name)) {
       throw new Error(`A scheduled job named "${input.name}" already exists.`);

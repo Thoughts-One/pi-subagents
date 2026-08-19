@@ -141,6 +141,13 @@ describe("SubagentScheduler — lifecycle", () => {
     })).toThrow(/already exists/);
   });
 
+  it("rejects scheduled documentation-auditor dispatch before persistence", () => {
+    expect(() => scheduler.addJob({
+      name: "docs", description: "audit docs", schedule: "1h", subagent_type: "documentation-auditor", prompt: "audit",
+    })).toThrow("audit_documents");
+    expect(scheduler.list()).toEqual([]);
+  });
+
   it("removeJob clears the job and emits removed", () => {
     const job = scheduler.addJob({ name: "j1", description: "x", schedule: "1h", subagent_type: "general-purpose", prompt: "p" });
     expect(scheduler.removeJob(job.id)).toBe(true);

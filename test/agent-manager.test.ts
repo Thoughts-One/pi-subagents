@@ -1,7 +1,11 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
 import { registerAgents } from "../src/agent-types.js";
+import { prepareDocumentationAudit } from "../src/documentation-audit.js";
 import type { AgentRecord } from "../src/types.js";
 
 vi.mock("../src/agent-runner.js", () => ({
@@ -1134,6 +1138,25 @@ describe("AgentManager — runAgent rejection leaves the record visible with err
 
 // #144 — a run that RESOLVES with a failed final turn (pi never rejects on
 // retry exhaustion) must map to status "error", not "completed".
+describe("AgentManager — documentation audit admission", () => {
+  let manager: AgentManager;
+
+  afterEach(() => manager?.dispose());
+
+  it("rejects direct documentation-auditor spawns before creating a record or runner", () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockClear();
+
+    expect(() => manager.spawn(mockPi, mockCtx, "documentation-auditor", "audit", {
+      description: "audit docs",
+      isBackground: true,
+    })).toThrow("audit_documents");
+    expect(manager.listAgents()).toEqual([]);
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+});
+
 describe("AgentManager — resolved runs with a failed final turn map to error (#144)", () => {
   let manager: AgentManager;
   afterEach(() => manager?.dispose());
@@ -1239,5 +1262,58 @@ describe("AgentManager — resolved runs with a failed final turn map to error (
 
     expect(record.status).toBe("error");
     expect(record.result).toBe("new partial progress"); // salvageable, this-run text
+  });
+});
+
+describe("AgentManager — typed documentation audit resume", () => {
+  let manager: AgentManager;
+
+  afterEach(() => manager?.dispose());
+
+  it("allows a live typed-origin audit record to resume", async () => {
+    const root = mkdtempSync(join(tmpdir(), "typed-audit-resume-"));
+    const artifact = join(root, "guide.md");
+    writeFileSync(artifact, "Guide");
+    try {
+      const prepared = prepareDocumentationAudit({
+        description: "Audit project documentation",
+        objective: "Classify the documentation artifact.",
+        manifest: [artifact],
+        authority_roots: [root],
+        labels: [{ name: "DONE", definition: "Complete." }],
+        precedence: "none",
+        disposition_rules: [{ artifact_type: "guide", rule: "Keep." }],
+        reference_evidence: [{ artifact, references: [`${artifact}:1`] }],
+      });
+      if ("error" in prepared) throw new Error(prepared.error);
+      manager = new AgentManager();
+      vi.mocked(runAgent).mockResolvedValue({
+        responseText: "OUTCOME: COMPLETE",
+        session: mockSession(),
+        aborted: false,
+        steered: false,
+      });
+      const spawnOptions = {
+        description: prepared.request.description,
+        isBackground: true,
+        documentationAuditAdmission: prepared.admission,
+      };
+      const id = manager.spawn(mockPi, mockCtx, "documentation-auditor", prepared.prompt, spawnOptions);
+      expect(() => manager.spawn(mockPi, mockCtx, "documentation-auditor", prepared.prompt, spawnOptions)).toThrow("audit_documents");
+      expect(manager.listAgents()).toHaveLength(1);
+      await manager.getRecord(id)!.promise;
+      vi.mocked(resumeAgent).mockResolvedValue({ text: "OUTCOME: COMPLETE", failure: undefined });
+      const resumeCalls = vi.mocked(resumeAgent).mock.calls.length;
+
+      await manager.resume(id, "Continue.");
+
+      expect(manager.getRecord(id)).toEqual(expect.objectContaining({
+        status: "completed",
+        result: "OUTCOME: COMPLETE",
+      }));
+      expect(resumeAgent).toHaveBeenCalledTimes(resumeCalls + 1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

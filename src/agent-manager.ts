@@ -14,8 +14,13 @@ import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
+import {
+  claimDocumentationAuditAdmission,
+  isBoundDocumentationAuditAdmission,
+  isUnclaimedDocumentationAuditAdmission,
+} from "./documentation-audit.js";
 import { resolveModel } from "./model-resolver.js";
-import type { AgentInvocation, AgentRecord, IsolationMode, ModelAuthority, SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentInvocation, AgentRecord, DocumentationAuditAdmission, IsolationMode, ModelAuthority, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
 
@@ -33,6 +38,36 @@ const DEFAULT_MAX_CONCURRENT = 4;
  * directory — curated errors instead of TypeErrors from path/fs internals
  * (RPC callers send arbitrary JSON: null, numbers, file paths).
  */
+function isDocumentationAuditor(type: SubagentType): boolean {
+  return type.trim().toLowerCase() === "documentation-auditor";
+}
+
+function assertFreshDocumentationAuditAdmission(
+  type: SubagentType,
+  admission: DocumentationAuditAdmission | undefined,
+): void {
+  if (isDocumentationAuditor(type) && !isUnclaimedDocumentationAuditAdmission(admission)) {
+    throw new Error("documentation-auditor can only be started or resumed through audit_documents.");
+  }
+}
+
+function assertBoundDocumentationAuditAdmission(record: AgentRecord): void {
+  if (isDocumentationAuditor(record.type) && !isBoundDocumentationAuditAdmission(record.documentationAuditAdmission, record.id)) {
+    throw new Error("documentation-auditor can only be started or resumed through audit_documents.");
+  }
+}
+
+function assertDocumentationAuditResume(record: AgentRecord): void {
+  assertBoundDocumentationAuditAdmission(record);
+  if (
+    isDocumentationAuditor(record.type)
+    && record.status === "completed"
+    && record.result?.split(/\r?\n/, 1)[0] === "OUTCOME: INPUT_REQUIRED"
+  ) {
+    throw new Error("documentation-auditor completed an INPUT_REQUIRED gate and cannot be resumed.");
+  }
+}
+
 function assertValidSpawnCwd(cwd: unknown): asserts cwd is string | undefined | null {
   if (cwd == null) return;
   if (typeof cwd !== "string" || !isAbsolute(cwd)) {
@@ -123,6 +158,8 @@ interface SpawnOptions {
   configCwd?: string;
   /** Root session id, inherited by nested launches so transcripts stay grouped. */
   rootSessionId?: string;
+  /** Opaque admission issued only by audit_documents after typed validation. */
+  documentationAuditAdmission?: DocumentationAuditAdmission;
 }
 
 export class AgentManager {
@@ -181,6 +218,7 @@ export class AgentManager {
     // Validate before the queue branch — a queued spawn should fail at the
     // call, not minutes later at drain. Throw (not warn): programmatic callers
     // can fix and retry; the RPC layer converts throws into error envelopes.
+    assertFreshDocumentationAuditAdmission(type, options.documentationAuditAdmission);
     assertValidSpawnCwd(options.cwd);
     // Reject an unavailable configured pin before creating a record, queueing,
     // or creating a worktree. Callers carrying a nested registry provide its
@@ -193,6 +231,9 @@ export class AgentManager {
     const resolvedOptions: SpawnOptions = { ...options, model: resolvedModel, modelAuthority };
 
     const id = randomUUID().slice(0, 17);
+    if (isDocumentationAuditor(type) && !claimDocumentationAuditAdmission(options.documentationAuditAdmission, id)) {
+      throw new Error("documentation-auditor admission was already used.");
+    }
     const abortController = new AbortController();
     const record: AgentRecord = {
       id,
@@ -215,6 +256,7 @@ export class AgentManager {
       parentAgentId: options.parentAgentId,
       maxSubagentDepth: options.maxSubagentDepth,
       rootSessionId: options.rootSessionId,
+      documentationAuditAdmission: options.documentationAuditAdmission,
     };
     this.agents.set(id, record);
 
@@ -242,6 +284,7 @@ export class AgentManager {
     // Re-validate a caller-supplied cwd: queued spawns can start minutes after
     // spawn()'s check, and the directory may be gone by then (TOCTOU). Same
     // curated errors; drainQueue parks a throw on the record as an error.
+    assertBoundDocumentationAuditAdmission(record);
     assertValidSpawnCwd(options.cwd);
     // Single resolution point for the caller-supplied cwd — the worktree base
     // repo and both cleanup calls below MUST agree on this value forever.
@@ -517,6 +560,7 @@ export class AgentManager {
   ): Promise<AgentRecord | undefined> {
     const record = this.agents.get(id);
     if (!record?.session) return undefined;
+    assertDocumentationAuditResume(record);
 
     record.status = "running";
     record.startedAt = Date.now();
@@ -553,6 +597,11 @@ export class AgentManager {
     // Same contract as the spawn settle paths: children spawned during the
     // resumed turn must not outlive it — nothing else can see or reach them.
     this.abortOwnedChildren(id);
+    // A resume returns its result inline, but it still has a terminal lifecycle
+    // record. Mark it consumed before the callback so it persists and emits its
+    // terminal event without scheduling a duplicate background notification.
+    record.resultConsumed = true;
+    try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
 
     return record;
   }

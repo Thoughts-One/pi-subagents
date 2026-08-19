@@ -146,6 +146,30 @@ describe("issue #142: RPC handlers + subagents:ready are gated on session_start"
     expect(reply![1].data.id).toBeTruthy();
   });
 
+  it("rejects documentation-auditor RPC before child creation", async () => {
+    const { pi, lifecycle, busHandlers } = makePi();
+    subagentsExtension(pi);
+    await lifecycle.get("session_start")({}, ctx());
+    vi.mocked(runAgent).mockClear();
+
+    const requestId = "req-docs";
+    await busHandlers.get("subagents:rpc:spawn")!({
+      requestId,
+      type: "documentation-auditor",
+      prompt: "audit",
+      options: { description: "audit docs" },
+    });
+
+    const reply = pi.events.emit.mock.calls.find(
+      (call: any[]) => call[0] === `subagents:rpc:spawn:reply:${requestId}`,
+    );
+    expect(reply?.[1]).toEqual({
+      success: false,
+      error: "documentation-auditor can only be started through audit_documents.",
+    });
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
   it("is idempotent — a second session_start does not re-advertise or double-register", async () => {
     const { pi, lifecycle } = makePi();
     subagentsExtension(pi);
