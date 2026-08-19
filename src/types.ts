@@ -70,9 +70,14 @@ export interface AgentConfig {
   enabled?: boolean;
   /** Where this agent was loaded from */
   source?: "default" | "project" | "global";
+  /** Optional outer result contract enforced when the run settles. */
+  resultContract?: ResultContract;
 }
 
 export type JoinMode = 'async' | 'group' | 'smart';
+
+/** A frontmatter-declared outer result contract. */
+export type ResultContract = "plan-authority";
 
 export interface DocumentationAuditLabel {
   name: string;
@@ -185,6 +190,8 @@ export interface AgentRecord {
   rootSessionId?: string;
   /** Typed admission retained for documentation-auditor resume checks. */
   documentationAuditAdmission?: DocumentationAuditAdmission;
+  /** Result contract resolved from frontmatter at spawn time. */
+  resultContract?: ResultContract;
 }
 
 /** Resolved model configuration from the registry that authorized a spawn. */

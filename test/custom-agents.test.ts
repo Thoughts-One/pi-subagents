@@ -592,6 +592,23 @@ Agent prompt.`);
     expect(result.get("myagent")!.displayName).toBe("MyAgent");
   });
 
+  it("parses the plan-authority result contract only", () => {
+    writeAgent("Plan", `---
+result_contract: plan-authority
+---
+
+Plan.`);
+    writeAgent("unknown", `---
+result_contract: other
+---
+
+Unknown.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("Plan")!.resultContract).toBe("plan-authority");
+    expect(result.get("unknown")!.resultContract).toBeUndefined();
+  });
+
   it("parses disallowed_tools as csv list", () => {
     writeAgent("restricted", `---
 description: Restricted Agent

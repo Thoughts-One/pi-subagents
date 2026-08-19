@@ -20,6 +20,7 @@ import {
   isUnclaimedDocumentationAuditAdmission,
 } from "./documentation-audit.js";
 import { resolveModel } from "./model-resolver.js";
+import { validateResultContract } from "./result-contract.js";
 import type { AgentInvocation, AgentRecord, DocumentationAuditAdmission, IsolationMode, ModelAuthority, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
@@ -257,6 +258,7 @@ export class AgentManager {
       maxSubagentDepth: options.maxSubagentDepth,
       rootSessionId: options.rootSessionId,
       documentationAuditAdmission: options.documentationAuditAdmission,
+      resultContract: getAgentConfig(type)?.resultContract,
     };
     this.agents.set(id, record);
 
@@ -379,8 +381,14 @@ export class AgentManager {
       },
     })
       .then(({ responseText, session, aborted, steered, failure }) => {
-        // Don't overwrite status if externally stopped via abort()
-        if (record.status !== "stopped") {
+        const contractError = validateResultContract(record.resultContract, responseText);
+        // A declared result contract is authoritative: an invalid outer result
+        // is a package error even if the runner also reports another terminal state.
+        if (contractError) {
+          record.status = "error";
+          record.error = `Result contract violation: ${contractError}`;
+        // Don't overwrite status if externally stopped via abort().
+        } else if (record.status !== "stopped") {
           // Precedence: a hard abort keeps "aborted"; then a failed final turn
           // (provider error that pi resolved instead of rejecting, #144) is an
           // honest "error" — not a completion with an empty or stale result.
@@ -584,8 +592,13 @@ export class AgentManager {
       });
       // Same contract as the spawn path (#144): a failed final turn is an
       // error, not a completion — but the resumed text stays available.
-      record.status = failure ? "error" : "completed";
-      if (failure) record.error = failure;
+      const contractError = validateResultContract(record.resultContract, text);
+      record.status = failure || contractError ? "error" : "completed";
+      if (contractError) {
+        record.error = `Result contract violation: ${contractError}${failure ? ` Runner failure: ${failure}` : ""}`;
+      } else if (failure) {
+        record.error = failure;
+      }
       record.result = text;
       record.completedAt = Date.now();
     } catch (err) {

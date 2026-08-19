@@ -229,6 +229,7 @@ All fields are optional — sensible defaults for everything.
 | `run_in_background` | `false` | Run in background by default |
 | `isolated` | `false` | Hermetic specialist mode: forces `extensions: false` + `skills: false` + drops `ext:` selectors. Only built-in tools. Distinct from `isolation: worktree` (filesystem) |
 | `enabled` | `true` | Set to `false` to disable an agent (useful for hiding a default agent per-project) |
+| `result_contract` | — | Set to `plan-authority` to require the Plan result's first line to be a valid Claude Fable receipt or disclosed Sol fallback receipt; an invalid result is retained as a package error |
 
 Frontmatter is authoritative. If an agent file sets `model`, `thinking`, `max_turns`, `inherit_context`, `run_in_background`, `isolated`, or `isolation`, those values are locked for that agent. `Agent` tool parameters only fill fields the agent config leaves unspecified.
 
@@ -320,6 +321,15 @@ Start one `documentation-auditor` from a validated finite audit request. This is
 Required fields: `description` (3–5 words), `objective`, exact absolute readable regular-file `manifest` paths, canonical readable `authority_roots`, `labels` (`name`, `definition`), `precedence` (`"none"` or ordered authorities), `disposition_rules` (`artifact_type`, `rule`), and parent-produced `reference_evidence`. Evidence covers every manifest artifact exactly once and supplies either an existing readable `file:line` hit inside an authority root or one `zero-hit: <parent observation>` value. `run_in_background` is the only optional execution field.
 
 The tool canonicalizes paths, rejects aliases and root escapes, and renders a deterministic brief. Invalid input creates no child record, queue entry, session, transcript, or schedule. Valid foreground calls return the auditor result inline; valid background calls return an agent ID and use normal completion notifications.
+
+### Plan result contracts
+
+Set `result_contract: plan-authority` in Plan frontmatter to enforce outer provenance. A valid result begins on its first physical line with exactly one of:
+
+- `Claude-Subagent-Receipt: <json>` for fixed `claude-fable-5` success or failure.
+- `Plan-Fallback-Receipt: <json>` for a disclosed Fable failure and `openai-codex/gpt-5.6-sol` author.
+
+Receipt JSON has an exact key set. Missing, malformed, unknown, or non-leading provenance changes the package record to `error`; its raw result remains available for diagnosis. The validator checks receipt shape and authority identity, not plan quality.
 
 ### `get_subagent_result`
 

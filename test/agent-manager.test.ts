@@ -1157,6 +1157,88 @@ describe("AgentManager — documentation audit admission", () => {
 
 });
 
+describe("AgentManager — result contracts", () => {
+  let manager: AgentManager;
+
+  afterEach(() => manager?.dispose());
+
+  function registerPlanContract(): void {
+    registerAgents(new Map([["Plan", {
+      name: "Plan",
+      description: "Plan",
+      builtinToolNames: ["read"],
+      extensions: false,
+      skills: false,
+      systemPrompt: "Plan.",
+      promptMode: "replace",
+      resultContract: "plan-authority",
+    }]]));
+  }
+
+  it("records a contract violation before invoking completion side effects", async () => {
+    registerPlanContract();
+    let completed: AgentRecord | undefined;
+    manager = new AgentManager((record) => { completed = record; });
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "missing provenance",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+
+    try {
+      const id = manager.spawn(mockPi, mockCtx, "Plan", "plan", { description: "plan", isBackground: true });
+      const record = manager.getRecord(id)!;
+      await record.promise;
+
+      expect(record.status).toBe("error");
+      expect(record.error).toContain("Result contract violation");
+      expect(record.result).toBe("missing provenance");
+      expect(completed).toBe(record);
+      expect(completed?.status).toBe("error");
+    } finally {
+      registerAgents(new Map());
+    }
+  });
+
+  it("reports a resume contract violation even when the runner also fails", async () => {
+    registerPlanContract();
+    const receipt = {
+      role: "planner",
+      model: "claude-fable-5",
+      outcome: "success",
+      input_tokens: 1,
+      output_tokens: 1,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      duration_ms: 1,
+      failure_class: null,
+      escalated: false,
+      truncated: false,
+    };
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: `Claude-Subagent-Receipt: ${JSON.stringify(receipt)}\nPlan.`,
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+    try {
+      const id = manager.spawn(mockPi, mockCtx, "Plan", "plan", { description: "plan", isBackground: true });
+      await manager.getRecord(id)!.promise;
+      vi.mocked(resumeAgent).mockResolvedValue({ text: "missing provenance", failure: "provider failed" });
+
+      const record = await manager.resume(id, "continue");
+
+      expect(record).toEqual(expect.objectContaining({ status: "error", result: "missing provenance" }));
+      expect(record?.error).toContain("Result contract violation");
+      expect(record?.error).toContain("Runner failure: provider failed");
+    } finally {
+      registerAgents(new Map());
+    }
+  });
+});
+
 describe("AgentManager — resolved runs with a failed final turn map to error (#144)", () => {
   let manager: AgentManager;
   afterEach(() => manager?.dispose());
