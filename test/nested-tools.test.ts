@@ -7,6 +7,7 @@ import { loadCustomAgents } from "../src/custom-agents.js";
 import { setScopeModelsEnabled } from "../src/model-scope.js";
 import { createNestedSubagentTools, type NestedAgentManager } from "../src/nested-tools.js";
 import { encodeCwd } from "../src/output-file.js";
+import { createLifetimeUsage, getLifetimeComponents } from "../src/usage.js";
 
 let cwd: string;
 let manager: NestedAgentManager;
@@ -464,10 +465,13 @@ describe("child-safe nested Agent tools", () => {
   });
 
   it("attributes a nested child's token spend to the owning parent", async () => {
-    const parent = { id: "parent-1", status: "running", lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 } };
+    const parent = { id: "parent-1", status: "running", lifetimeUsage: createLifetimeUsage() };
     records.set("parent-1", parent);
     spawn.mockImplementation((_pi, _ctx, _type, _prompt, options) => {
-      options.onAssistantUsage?.({ input: 100, output: 20, cacheWrite: 5 });
+      options.onUsage?.({ kind: "model", model: { provider: "anthropic", model: "child" }, usage: {
+        input: 100, output: 20, cacheRead: 0, cacheWrite: 5,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      } });
       return "child-1";
     });
 
@@ -479,21 +483,24 @@ describe("child-safe nested Agent tools", () => {
       run_in_background: true,
     });
 
-    expect(parent.lifetimeUsage).toEqual({ input: 100, output: 20, cacheWrite: 5 });
+    expect(getLifetimeComponents(parent.lifetimeUsage)).toMatchObject({ input: 100, output: 20, cacheWrite: 5 });
   });
 
   it("attributes spend up the whole ancestor chain, not just one level", async () => {
     // A spawn callback fires only for that child's own turns, so a deeper
     // descendant would otherwise never reach the one record anyone can see.
-    const top = { id: "top", status: "running", lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 } };
+    const top = { id: "top", status: "running", lifetimeUsage: createLifetimeUsage() };
     const middle = {
       id: "parent-1", status: "running", parentAgentId: "top",
-      lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
+      lifetimeUsage: createLifetimeUsage(),
     };
     records.set("top", top);
     records.set("parent-1", middle);
     spawn.mockImplementation((_pi, _ctx, _type, _prompt, options) => {
-      options.onAssistantUsage?.({ input: 7, output: 3, cacheWrite: 1 });
+      options.onUsage?.({ kind: "model", model: { provider: "anthropic", model: "child" }, usage: {
+        input: 7, output: 3, cacheRead: 0, cacheWrite: 1,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      } });
       return "child-1";
     });
 
@@ -505,8 +512,8 @@ describe("child-safe nested Agent tools", () => {
       run_in_background: true,
     });
 
-    expect(middle.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 1 });
-    expect(top.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 1 });
+    expect(getLifetimeComponents(middle.lifetimeUsage)).toMatchObject({ input: 7, output: 3, cacheWrite: 1 });
+    expect(getLifetimeComponents(top.lifetimeUsage)).toMatchObject({ input: 7, output: 3, cacheWrite: 1 });
   });
 
   it("files a nested transcript under the root session, honoring output_transcript", async () => {

@@ -35,7 +35,7 @@ import type {
   ModelAuthority,
   ThinkingLevel,
 } from "./types.js";
-import { addUsage } from "./usage.js";
+import { type AttributedUsageEvent, addUsage } from "./usage.js";
 
 /**
  * Hard ceiling on nesting for every branch: main session = 0, its subagents = 1,
@@ -62,7 +62,7 @@ interface NestedSpawnOptions {
   isolation?: IsolationMode;
   invocation?: AgentInvocation;
   signal?: AbortSignal;
-  onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
+  onUsage?: (event: AttributedUsageEvent) => void;
   onSessionCreated?: (session: AgentSession) => void;
   depth: number;
   parentAgentId: string;
@@ -276,11 +276,11 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         // great-grandchild from the only record anyone can see. (The live
         // widget/fleet counters read their own per-agent activity tracker, which
         // still sees only the top-level agent's own turns.)
-        onAssistantUsage: (usage) => {
+        onUsage: (event) => {
           for (let id: string | undefined = context.parentAgentId; id !== undefined; ) {
             const ancestor = context.manager.getRecord(id);
             if (!ancestor) break;
-            addUsage(ancestor.lifetimeUsage, usage);
+            addUsage(ancestor.lifetimeUsage, event);
             id = ancestor.parentAgentId;
           }
         },

@@ -562,13 +562,13 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
   });
 });
 
-// ─── message_end → onAssistantUsage wiring (issue #38) ─────────────────
+// ─── message_end → onUsage wiring (issue #38) ──────────────────────────
 // Both runAgent and resumeAgent dispatch usage to the caller via this
 // callback. The callback feeds the AgentRecord lifetime accumulator, which
 // is the source of truth for total tokens (survives compaction).
 describe("agent-runner usage callback wiring", () => {
   function emitMessageEnd(listeners: Array<(e: any) => void>, usage: any) {
-    const event = { type: "message_end", message: { role: "assistant", usage } };
+    const event = { type: "message_end", message: { role: "assistant", provider: "anthropic", model: "child", usage } };
     for (const l of listeners) l(event);
   }
 
@@ -576,7 +576,7 @@ describe("agent-runner usage callback wiring", () => {
     const { session, listeners } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
-    const seen: Array<{ input: number; output: number; cacheWrite: number }> = [];
+    const seen: any[] = [];
     session.prompt = vi.fn(async () => {
       // Two assistant messages over the run
       emitMessageEnd(listeners, { input: 100, output: 50, cacheWrite: 10 });
@@ -586,12 +586,12 @@ describe("agent-runner usage callback wiring", () => {
 
     await runAgent(ctx, "Explore", "go", {
       pi,
-      onAssistantUsage: (u) => seen.push(u),
+      onUsage: (u) => seen.push(u),
     });
 
-    expect(seen).toEqual([
-      { input: 100, output: 50, cacheWrite: 10 },
-      { input: 200, output: 80, cacheWrite: 20 },
+    expect(seen).toMatchObject([
+      { kind: "model", model: { provider: "anthropic", model: "child" }, usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 10 } },
+      { kind: "model", model: { provider: "anthropic", model: "child" }, usage: { input: 200, output: 80, cacheRead: 0, cacheWrite: 20 } },
     ]);
   });
 
@@ -607,10 +607,10 @@ describe("agent-runner usage callback wiring", () => {
 
     await runAgent(ctx, "Explore", "go", {
       pi,
-      onAssistantUsage: (u) => seen.push(u),
+      onUsage: (u) => seen.push(u),
     });
 
-    expect(seen).toEqual([{ input: 50, output: 0, cacheWrite: 0 }]);
+    expect(seen).toMatchObject([{ kind: "model", usage: { input: 50, output: 0, cacheRead: 0, cacheWrite: 0 } }]);
   });
 
   it("runAgent skips the callback when message_end has no usage field", async () => {
@@ -623,7 +623,7 @@ describe("agent-runner usage callback wiring", () => {
       session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
     });
 
-    await runAgent(ctx, "Explore", "go", { pi, onAssistantUsage: cb });
+    await runAgent(ctx, "Explore", "go", { pi, onUsage: cb });
 
     expect(cb).not.toHaveBeenCalled();
   });
@@ -638,10 +638,80 @@ describe("agent-runner usage callback wiring", () => {
     });
 
     await resumeAgent(session as any, "continue", {
-      onAssistantUsage: (u) => seen.push(u),
+      onUsage: (u) => seen.push(u),
     });
 
-    expect(seen).toEqual([{ input: 10, output: 20, cacheWrite: 5 }]);
+    expect(seen).toMatchObject([{ kind: "model", usage: { input: 10, output: 20, cacheRead: 0, cacheWrite: 5 } }]);
+  });
+
+  it("captures tool usage with explicit attribution and leaves unknown models scoped to their tool", async () => {
+    const { session, listeners } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const seen: any[] = [];
+    session.prompt = vi.fn(async () => {
+      for (const listener of listeners) {
+        listener({
+          type: "message_end",
+          message: {
+            role: "toolResult",
+            toolName: "Plan",
+            usage: { input: 2, output: 3, cacheRead: 4, cacheWrite: 5, cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1, total: 4 } },
+            details: {
+              usageModel: { provider: "openai", id: "gpt-5" },
+              // Pi 0.80 fixtures placed tool usage here. Pi 0.84's top-level
+              // value above is authoritative when both are present.
+              usage: { input: 200, output: 300, cacheRead: 400, cacheWrite: 500 },
+            },
+          },
+        });
+        listener({
+          type: "message_end",
+          message: {
+            role: "toolResult",
+            toolName: "unknown_nested_tool",
+            details: { usage: { input: 6, output: 7, cacheRead: 8, cacheWrite: 9, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } },
+          },
+        });
+      }
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
+    });
+
+    await runAgent(ctx, "Explore", "go", { pi, onUsage: (event) => seen.push(event) });
+
+    expect(seen).toMatchObject([
+      { kind: "model", model: { provider: "openai", model: "gpt-5" }, usage: { input: 2, output: 3, cacheRead: 4, cacheWrite: 5 } },
+      { kind: "unattributedTool", toolName: "unknown_nested_tool", usage: { input: 6, output: 7, cacheRead: 8, cacheWrite: 9 } },
+    ]);
+  });
+
+  it("commits each successful compaction response once and discards an aborted compaction", async () => {
+    const { session, listeners } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const response = {
+      role: "assistant",
+      provider: "anthropic",
+      model: "claude-child",
+      usage: { input: 11, output: 12, cacheRead: 13, cacheWrite: 14, cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 } },
+    };
+    const stream = { result: vi.fn(async () => response) };
+    session.agent.streamFn = vi.fn(async () => stream);
+    const seen: any[] = [];
+    session.prompt = vi.fn(async () => {
+      for (const listener of listeners) listener({ type: "compaction_start", reason: "threshold" });
+      await (await session.agent.streamFn({ provider: "anthropic", id: "claude-child" }, {}, {})).result();
+      for (const listener of listeners) listener({ type: "compaction_end", aborted: false, reason: "threshold", result: { tokensBefore: 123 } });
+      for (const listener of listeners) listener({ type: "compaction_start", reason: "manual" });
+      await (await session.agent.streamFn({ provider: "anthropic", id: "claude-child" }, {}, {})).result();
+      for (const listener of listeners) listener({ type: "compaction_end", aborted: true, reason: "manual", result: undefined });
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
+    });
+
+    await runAgent(ctx, "Explore", "go", { pi, onUsage: (event) => seen.push(event) });
+
+    expect(seen).toMatchObject([
+      { kind: "model", model: { provider: "anthropic", model: "claude-child" }, usage: { input: 11, output: 12, cacheRead: 13, cacheWrite: 14 } },
+    ]);
+    expect(seen).toHaveLength(1);
   });
 
   it("forwards compaction_end events to onCompaction (only when not aborted)", async () => {

@@ -7,6 +7,7 @@ import { AgentManager } from "../src/agent-manager.js";
 import { registerAgents } from "../src/agent-types.js";
 import { prepareDocumentationAudit } from "../src/documentation-audit.js";
 import type { AgentRecord } from "../src/types.js";
+import { getLifetimeComponents } from "../src/usage.js";
 
 vi.mock("../src/agent-runner.js", () => ({
   runAgent: vi.fn(),
@@ -573,13 +574,13 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     });
     const record = manager.getRecord(id)!;
 
-    expect(record.lifetimeUsage).toEqual({ input: 0, output: 0, cacheWrite: 0 });
+    expect(record.lifetimeUsage).toEqual({ schemaVersion: 1, cumulative: true, models: {}, unattributedTools: {} });
     expect(record.compactionCount).toBe(0);
 
     manager.abort(id);
   });
 
-  it("onAssistantUsage from runAgent accumulates into record.lifetimeUsage", async () => {
+  it("onUsage from runAgent accumulates model-bucketed usage into the record", async () => {
     manager = new AgentManager();
 
     // Capture the options passed to runAgent so we can drive callbacks
@@ -587,8 +588,14 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
       captured = opts;
       // Two assistant messages with usage
-      opts.onAssistantUsage?.({ input: 100, output: 50, cacheWrite: 10 });
-      opts.onAssistantUsage?.({ input: 200, output: 80, cacheWrite: 20 });
+      opts.onUsage?.({ kind: "model", model: { provider: "anthropic", model: "child" }, usage: {
+        input: 100, output: 50, cacheRead: 0, cacheWrite: 10,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      } });
+      opts.onUsage?.({ kind: "model", model: { provider: "anthropic", model: "child" }, usage: {
+        input: 200, output: 80, cacheRead: 0, cacheWrite: 20,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      } });
       return { responseText: "done", session: mockSession(), aborted: false, steered: false };
     });
 
@@ -599,8 +606,8 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     await manager.getRecord(id)!.promise;
 
     expect(captured).toBeDefined();
-    expect(manager.getRecord(id)!.lifetimeUsage).toEqual({
-      input: 300, output: 130, cacheWrite: 30,
+    expect(manager.getRecord(id)!.lifetimeUsage.models["anthropic/child"]).toMatchObject({
+      calls: 2, input: 300, output: 130, cacheWrite: 30,
     });
   });
 
@@ -651,21 +658,26 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     });
     await manager.getRecord(id)!.promise;
 
-    // Pre-resume: lifetimeUsage from spawn was zero (mock didn't call onAssistantUsage)
-    expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 0, output: 0, cacheWrite: 0 });
+    // Pre-resume: lifetimeUsage from spawn was zero (mock didn't call onUsage)
+    expect(getLifetimeComponents(manager.getRecord(id)!.lifetimeUsage)).toMatchObject({ input: 0, output: 0, cacheWrite: 0 });
     expect(manager.getRecord(id)!.compactionCount).toBe(0);
 
     // Now resume — drive callbacks via the mocked resumeAgent
     const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
     vi.mocked(resumeMock).mockImplementation(async (_session, _prompt, opts: any) => {
-      opts.onAssistantUsage?.({ input: 70, output: 30, cacheWrite: 5 });
+      opts.onUsage?.({ kind: "model", model: { provider: "anthropic", model: "child" }, usage: {
+        input: 70, output: 30, cacheRead: 0, cacheWrite: 5,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      } });
       opts.onCompaction?.({ reason: "overflow", tokensBefore: 999 });
       return { text: "second" };
     });
 
     await manager.resume(id, "more");
 
-    expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 70, output: 30, cacheWrite: 5 });
+    expect(manager.getRecord(id)!.lifetimeUsage.models["anthropic/child"]).toMatchObject({
+      calls: 1, input: 70, output: 30, cacheWrite: 5,
+    });
     expect(manager.getRecord(id)!.compactionCount).toBe(1);
   });
 });

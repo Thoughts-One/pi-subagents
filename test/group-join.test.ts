@@ -9,6 +9,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GroupJoinManager } from "../src/group-join.js";
 import type { AgentRecord } from "../src/types.js";
+import { createLifetimeUsage } from "../src/usage.js";
 
 function makeRecord(id: string, overrides: Partial<AgentRecord> = {}): AgentRecord {
   return {
@@ -18,7 +19,7 @@ function makeRecord(id: string, overrides: Partial<AgentRecord> = {}): AgentReco
     status: "completed",
     toolUses: 0,
     startedAt: 0,
-    lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
+    lifetimeUsage: createLifetimeUsage(),
     ...overrides,
   };
 }
