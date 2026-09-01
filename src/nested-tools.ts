@@ -16,6 +16,7 @@ import {
   resolveTypeIn,
 } from "./agent-types.js";
 import { loadCustomAgents } from "./custom-agents.js";
+import { isDocumentationAuditorType } from "./documentation-audit.js";
 import { resolveAgentInvocationConfig } from "./invocation-config.js";
 import { resolveModel } from "./model-resolver.js";
 import { checkModelScope } from "./model-scope.js";
@@ -197,7 +198,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       // Reloaded per call so new agent files are picked up without a restart.
       const registry = loadRegistry();
       const rawType = params.subagent_type;
-      if (rawType.trim().toLowerCase() === "documentation-auditor") {
+      if (isDocumentationAuditorType(rawType)) {
         return textResult("documentation-auditor can only be started through audit_documents.", true);
       }
       // Strict resolve, never the fallback policy: a project-level

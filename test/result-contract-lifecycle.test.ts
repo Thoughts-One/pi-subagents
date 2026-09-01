@@ -120,6 +120,27 @@ describe("Plan result contract settlement", () => {
     });
   }
 
+  it("preserves a fresh runner failure alongside a result-contract violation", async () => {
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "Plan body without provenance.",
+      session: { dispose: vi.fn() } as any,
+      aborted: false,
+      steered: false,
+      failure: "provider final turn failed",
+    });
+    const order: string[] = [];
+    const { pi, tools, lifecycle } = makePi(order);
+    subagentsExtension(pi);
+    const result = await tools.get("Agent").execute("call", planParams(), undefined, undefined, context(root));
+
+    expect(textOf(result)).toContain("Result contract violation");
+    expect(textOf(result)).toContain("Runner failure: provider final turn failed");
+    expect(pi.appendEntry).toHaveBeenCalledWith("subagents:record", expect.objectContaining({
+      error: expect.stringContaining("Runner failure: provider final turn failed"),
+    }));
+    await lifecycle.get("session_shutdown")?.();
+  });
+
   it("a scheduled Plan run persists its result-contract failure", async () => {
     vi.useFakeTimers();
     vi.mocked(runAgent).mockResolvedValue({

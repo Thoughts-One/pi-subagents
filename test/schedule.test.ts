@@ -148,6 +148,43 @@ describe("SubagentScheduler — lifecycle", () => {
     expect(scheduler.list()).toEqual([]);
   });
 
+  it("rejects an update to documentation-auditor before persistence or re-arming", () => {
+    const job = scheduler.addJob({
+      name: "general", description: "general", schedule: "1h", subagent_type: "general-purpose", prompt: "run",
+    });
+    expect(() => scheduler.updateJob(job.id, { subagent_type: "documentation-auditor" })).toThrow("audit_documents");
+    expect(scheduler.list()[0].subagent_type).toBe("general-purpose");
+  });
+
+  it("does not arm a prohibited documentation-auditor loaded from storage", () => {
+    scheduler.stop();
+    store.add({
+      id: "stored-docs",
+      name: "stored docs",
+      description: "stored docs",
+      schedule: "1h",
+      scheduleType: "interval",
+      intervalMs: 3_600_000,
+      subagent_type: "documentation-auditor",
+      prompt: "audit",
+      enabled: true,
+      createdAt: new Date().toISOString(),
+      runCount: 0,
+    });
+    scheduler.start(pi, ctx, manager, store);
+    expect((scheduler as any).intervals.size).toBe(0);
+    expect(store.get("stored-docs")).toEqual(expect.objectContaining({
+      enabled: false,
+      lastStatus: "error",
+    }));
+    expect(scheduler.getNextRun("stored-docs")).toBeUndefined();
+    expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
+      type: "error",
+      jobId: "stored-docs",
+      error: expect.stringContaining("audit_documents"),
+    }));
+  });
+
   it("removeJob clears the job and emits removed", () => {
     const job = scheduler.addJob({ name: "j1", description: "x", schedule: "1h", subagent_type: "general-purpose", prompt: "p" });
     expect(scheduler.removeJob(job.id)).toBe(true);
@@ -263,6 +300,55 @@ describe("SubagentScheduler — fire path", () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
+  it("rejects an unknown schedule whose configured fallback is documentation-auditor", () => {
+    registerAgents(new Map([["documentation-auditor", {
+      name: "documentation-auditor",
+      description: "Documentation Auditor",
+      builtinToolNames: ["read"],
+      extensions: false,
+      skills: false,
+      systemPrompt: "Audit.",
+      promptMode: "replace",
+    }]]));
+    setFallbackSubagent("documentation-auditor");
+
+    expect(() => scheduler.addJob({
+      name: "fallback-docs",
+      description: "fallback docs",
+      schedule: "1h",
+      subagent_type: "unknown-role",
+      prompt: "audit",
+    })).toThrow("audit_documents");
+    expect(store.list()).toEqual([]);
+  });
+
+  it("disables an armed job if its live fallback changes to documentation-auditor", () => {
+    const configs = new Map([
+      ["general-purpose", {
+        name: "general-purpose", description: "General", builtinToolNames: ["read"], extensions: false, skills: false, systemPrompt: "General.", promptMode: "replace",
+      }],
+      ["documentation-auditor", {
+        name: "documentation-auditor", description: "Documentation Auditor", builtinToolNames: ["read"], extensions: false, skills: false, systemPrompt: "Audit.", promptMode: "replace",
+      }],
+    ] as const);
+    registerAgents(configs as any);
+    setFallbackSubagent("general-purpose");
+    const job = scheduler.addJob({
+      name: "fallback-change", description: "fallback", schedule: "1s", subagent_type: "unknown-role", prompt: "run",
+    });
+    setFallbackSubagent("documentation-auditor");
+
+    vi.advanceTimersByTime(1_000);
+
+    expect(manager.spawn).not.toHaveBeenCalled();
+    expect(store.get(job.id)).toEqual(expect.objectContaining({ enabled: false, lastStatus: "error" }));
+    expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
+      type: "error",
+      jobId: job.id,
+      error: expect.stringContaining("audit_documents"),
+    }));
+  });
+
   it("interval jobs fire repeatedly via setInterval", () => {
     scheduler.addJob({
       name: "every-10s", description: "tick", schedule: "10s",
@@ -300,6 +386,23 @@ describe("SubagentScheduler — fire path", () => {
         error: expect.stringContaining("Unknown or disabled agent type"),
       }),
     );
+  });
+
+  it("does not disable an ordinary job because its error text mentions audit_documents", () => {
+    registerAgents(new Map());
+    setFallbackSubagent(NO_FALLBACK);
+    const job = scheduler.addJob({
+      name: "ordinary-error", description: "ordinary", schedule: "1s",
+      subagent_type: "audit_documents-missing-role", prompt: "run",
+    });
+
+    vi.advanceTimersByTime(2_000);
+
+    expect(manager.spawn).not.toHaveBeenCalled();
+    expect(store.get(job.id)).toEqual(expect.objectContaining({
+      enabled: true,
+      lastStatus: "error",
+    }));
   });
 
   it("fails closed before marking running or spawning when a configured pin is unavailable", () => {

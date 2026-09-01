@@ -17,6 +17,7 @@ import { getAgentConfig } from "./agent-types.js";
 import {
   claimDocumentationAuditAdmission,
   isBoundDocumentationAuditAdmission,
+  isDocumentationAuditorType,
   isUnclaimedDocumentationAuditAdmission,
 } from "./documentation-audit.js";
 import { resolveModel } from "./model-resolver.js";
@@ -39,21 +40,17 @@ const DEFAULT_MAX_CONCURRENT = 4;
  * directory — curated errors instead of TypeErrors from path/fs internals
  * (RPC callers send arbitrary JSON: null, numbers, file paths).
  */
-function isDocumentationAuditor(type: SubagentType): boolean {
-  return type.trim().toLowerCase() === "documentation-auditor";
-}
-
 function assertFreshDocumentationAuditAdmission(
   type: SubagentType,
   admission: DocumentationAuditAdmission | undefined,
 ): void {
-  if (isDocumentationAuditor(type) && !isUnclaimedDocumentationAuditAdmission(admission)) {
+  if (isDocumentationAuditorType(type) && !isUnclaimedDocumentationAuditAdmission(admission)) {
     throw new Error("documentation-auditor can only be started or resumed through audit_documents.");
   }
 }
 
 function assertBoundDocumentationAuditAdmission(record: AgentRecord): void {
-  if (isDocumentationAuditor(record.type) && !isBoundDocumentationAuditAdmission(record.documentationAuditAdmission, record.id)) {
+  if (isDocumentationAuditorType(record.type) && !isBoundDocumentationAuditAdmission(record.documentationAuditAdmission, record.id)) {
     throw new Error("documentation-auditor can only be started or resumed through audit_documents.");
   }
 }
@@ -61,12 +58,21 @@ function assertBoundDocumentationAuditAdmission(record: AgentRecord): void {
 function assertDocumentationAuditResume(record: AgentRecord): void {
   assertBoundDocumentationAuditAdmission(record);
   if (
-    isDocumentationAuditor(record.type)
-    && record.status === "completed"
+    isDocumentationAuditorType(record.type)
     && record.result?.split(/\r?\n/, 1)[0] === "OUTCOME: INPUT_REQUIRED"
   ) {
     throw new Error("documentation-auditor completed an INPUT_REQUIRED gate and cannot be resumed.");
   }
+}
+
+function resultContractViolation(
+  contract: AgentRecord["resultContract"],
+  responseText: string,
+  failure: string | undefined,
+): string | undefined {
+  const violation = validateResultContract(contract, responseText);
+  if (!violation) return undefined;
+  return `Result contract violation: ${violation}${failure ? ` Runner failure: ${failure}` : ""}`;
 }
 
 function assertValidSpawnCwd(cwd: unknown): asserts cwd is string | undefined | null {
@@ -232,7 +238,7 @@ export class AgentManager {
     const resolvedOptions: SpawnOptions = { ...options, model: resolvedModel, modelAuthority };
 
     const id = randomUUID().slice(0, 17);
-    if (isDocumentationAuditor(type) && !claimDocumentationAuditAdmission(options.documentationAuditAdmission, id)) {
+    if (isDocumentationAuditorType(type) && !claimDocumentationAuditAdmission(options.documentationAuditAdmission, id)) {
       throw new Error("documentation-auditor admission was already used.");
     }
     const abortController = new AbortController();
@@ -381,12 +387,12 @@ export class AgentManager {
       },
     })
       .then(({ responseText, session, aborted, steered, failure }) => {
-        const contractError = validateResultContract(record.resultContract, responseText);
+        const contractError = resultContractViolation(record.resultContract, responseText, failure);
         // A declared result contract is authoritative: an invalid outer result
         // is a package error even if the runner also reports another terminal state.
         if (contractError) {
           record.status = "error";
-          record.error = `Result contract violation: ${contractError}`;
+          record.error = contractError;
         // Don't overwrite status if externally stopped via abort().
         } else if (record.status !== "stopped") {
           // Precedence: a hard abort keeps "aborted"; then a failed final turn
@@ -592,10 +598,10 @@ export class AgentManager {
       });
       // Same contract as the spawn path (#144): a failed final turn is an
       // error, not a completion — but the resumed text stays available.
-      const contractError = validateResultContract(record.resultContract, text);
+      const contractError = resultContractViolation(record.resultContract, text, failure);
       record.status = failure || contractError ? "error" : "completed";
       if (contractError) {
-        record.error = `Result contract violation: ${contractError}${failure ? ` Runner failure: ${failure}` : ""}`;
+        record.error = contractError;
       } else if (failure) {
         record.error = failure;
       }

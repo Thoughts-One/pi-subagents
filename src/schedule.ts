@@ -20,6 +20,7 @@ import { Cron } from "croner";
 import { nanoid } from "nanoid";
 import type { AgentManager } from "./agent-manager.js";
 import { getAgentConfig, resolveSpawnType } from "./agent-types.js";
+import { isDocumentationAuditorType } from "./documentation-audit.js";
 import { resolveModel } from "./model-resolver.js";
 import type { ScheduleStore } from "./schedule-store.js";
 import type { IsolationMode, ModelAuthority, ScheduledSubagent, SubagentType, ThinkingLevel } from "./types.js";
@@ -33,6 +34,16 @@ export type ScheduleChangeEvent =
   | { type: "error"; jobId: string; error: string };
 
 /** Params accepted at job creation — ID, timestamps, and state are derived. */
+class DocumentationAuditScheduleError extends Error {}
+
+function assertSchedulableType(type: SubagentType): void {
+  const dispatch = resolveSpawnType(type);
+  const effectiveType = dispatch.ok ? dispatch.type : type;
+  if (isDocumentationAuditorType(type) || isDocumentationAuditorType(effectiveType)) {
+    throw new DocumentationAuditScheduleError("documentation-auditor can only be started through audit_documents.");
+  }
+}
+
 export interface NewJobInput {
   name: string;
   description: string;
@@ -62,7 +73,18 @@ export class SubagentScheduler {
     this.store = store;
 
     for (const job of store.list()) {
-      if (job.enabled) this.scheduleJob(job);
+      if (!job.enabled) continue;
+      try {
+        assertSchedulableType(job.subagent_type);
+        this.scheduleJob(job);
+      } catch (error) {
+        store.update(job.id, { enabled: false, lastStatus: "error" });
+        this.emit({
+          type: "error",
+          jobId: job.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
   }
 
@@ -92,6 +114,7 @@ export class SubagentScheduler {
    * format and tags `scheduleType`. Throws on invalid input.
    */
   buildJob(input: NewJobInput): ScheduledSubagent {
+    assertSchedulableType(input.subagent_type);
     const detected = SubagentScheduler.detectSchedule(input.schedule);
     return {
       id: nanoid(10),
@@ -115,9 +138,6 @@ export class SubagentScheduler {
 
   /** Add a job, persist, and arm if enabled. Returns the stored job. */
   addJob(input: NewJobInput): ScheduledSubagent {
-    if (input.subagent_type.trim().toLowerCase() === "documentation-auditor") {
-      throw new Error("documentation-auditor can only be started through audit_documents.");
-    }
     const store = this.requireStore();
     if (store.hasName(input.name)) {
       throw new Error(`A scheduled job named "${input.name}" already exists.`);
@@ -141,6 +161,10 @@ export class SubagentScheduler {
   /** Toggle / mutate a job. Re-arms based on the new `enabled` state. */
   updateJob(id: string, patch: Partial<ScheduledSubagent>): ScheduledSubagent | undefined {
     const store = this.requireStore();
+    const current = store.get(id);
+    if (!current) return undefined;
+    const isPureDisable = Object.keys(patch).length === 1 && patch.enabled === false;
+    if (!isPureDisable) assertSchedulableType(patch.subagent_type ?? current.subagent_type);
     const updated = store.update(id, patch);
     if (!updated) return undefined;
     this.unscheduleJob(id);
@@ -169,6 +193,7 @@ export class SubagentScheduler {
   // ── Scheduling primitives ────────────────────────────────────────────
 
   private scheduleJob(job: ScheduledSubagent): void {
+    assertSchedulableType(job.subagent_type);
     const store = this.store;
     if (!store) return;
     try {
@@ -242,6 +267,7 @@ export class SubagentScheduler {
       // an Agent call — not a file deleted directly from a shell.
       dispatch = resolveSpawnType(job.subagent_type);
       if (!dispatch.ok) throw new Error(dispatch.message);
+      assertSchedulableType(job.subagent_type);
       modelAuthority = { configuredModel: getAgentConfig(dispatch.type)?.model };
       const modelInput = modelAuthority.configuredModel ?? job.model;
       if (modelInput) {
@@ -251,7 +277,12 @@ export class SubagentScheduler {
       }
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
-      store.update(id, { lastRun: new Date().toISOString(), lastStatus: "error" });
+      if (err instanceof DocumentationAuditScheduleError) {
+        this.unscheduleJob(id);
+        store.update(id, { enabled: false, lastRun: new Date().toISOString(), lastStatus: "error" });
+      } else {
+        store.update(id, { lastRun: new Date().toISOString(), lastStatus: "error" });
+      }
       this.emit({ type: "error", jobId: id, error });
       return;
     }

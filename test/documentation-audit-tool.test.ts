@@ -99,6 +99,13 @@ describe("audit_documents", () => {
       { disposition_rules: [{ artifact_type: "", rule: "rule" }] },
       { reference_evidence: [{ artifact: join(root, "guide.md"), references: ["bad"] }] },
       { run_in_background: "true" },
+      { prompt: "forbidden" },
+      { model: "forbidden" },
+      { resume: "forbidden" },
+      { schedule: "+1h" },
+      { labels: [{ name: "DONE", definition: "definition", extra: "forbidden" }] },
+      { disposition_rules: [{ artifact_type: "guide", rule: "keep", extra: "forbidden" }] },
+      { reference_evidence: [{ artifact: join(root, "guide.md"), references: ["zero-hit: parent searched"], extra: "forbidden" }] },
     ];
     const observedPreflightFailures = [
       { objective: "" },
@@ -228,6 +235,37 @@ describe("audit_documents", () => {
       result: "OUTCOME: INPUT_REQUIRED\nNeed a complete manifest.",
     }));
     expect(runAgent).toHaveBeenCalledTimes(runCalls);
+    await lifecycle.get("session_shutdown")?.();
+  });
+
+  it("does not resume a steered terminal INPUT_REQUIRED result", async () => {
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "OUTCOME: INPUT_REQUIRED\nNeed a complete manifest.",
+      session: { dispose: vi.fn() } as any,
+      aborted: false,
+      steered: true,
+    });
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    const started = await tools.get("audit_documents").execute("call", {
+      ...validRequest(),
+      run_in_background: true,
+    }, undefined, undefined, context(root));
+    const id = textOf(started).match(/Agent ID: (\S+)/)?.[1];
+    expect(id).toBeTruthy();
+    await new Promise((resolve) => setImmediate(resolve));
+    const registry = (globalThis as any)[Symbol.for("pi-subagents:manager")];
+    expect(registry.getRecord(id)?.status).toBe("steered");
+
+    const result = await tools.get("Agent").execute("call", {
+      description: "Resume typed documentation audit",
+      prompt: "Continue.",
+      subagent_type: "documentation-auditor",
+      resume: id,
+    }, undefined, undefined, context(root));
+
+    expect(textOf(result)).toContain("INPUT_REQUIRED gate");
+    expect(registry.getRecord(id)?.status).toBe("steered");
     await lifecycle.get("session_shutdown")?.();
   });
 });

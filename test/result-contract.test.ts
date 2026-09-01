@@ -26,8 +26,12 @@ const fallbackReceipt = {
 const withHeader = (header: string, receipt: object) => `${header}: ${JSON.stringify(receipt)}\nPlan body.`;
 
 describe("Plan authority result contract", () => {
-  it("accepts successful and failed Claude receipts", () => {
+  it("accepts successful, failed, and exact truncated Claude receipts", () => {
     expect(validatePlanAuthorityResult(withHeader("Claude-Subagent-Receipt", claudeReceipt))).toBeUndefined();
+    expect(validatePlanAuthorityResult(withHeader("Claude-Subagent-Receipt", {
+      ...claudeReceipt,
+      truncated: true,
+    }))).toBeUndefined();
     expect(validatePlanAuthorityResult(withHeader("Claude-Subagent-Receipt", {
       ...claudeReceipt,
       outcome: "failure",

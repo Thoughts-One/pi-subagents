@@ -1,5 +1,7 @@
 import { accessSync, closeSync, constants as fsConstants, openSync, readSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative } from "node:path";
+import { Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import type {
   DocumentationAuditAdmission,
   DocumentationAuditRequest,
@@ -12,9 +14,41 @@ const MAX_TEXT_LENGTH = 4_000;
 const MAX_REFERENCE_HITS = 64;
 const admissions = new WeakMap<object, { agentId?: string }>();
 
+export const DOCUMENTATION_AUDIT_PARAMETERS = Type.Object({
+  description: Type.String({ description: "Three to five word UI label." }),
+  objective: Type.String({ description: "Non-empty documentation audit objective." }),
+  manifest: Type.Array(Type.String({ description: "Exact absolute readable artifact path." }), { minItems: 1, maxItems: MAX_ITEMS }),
+  authority_roots: Type.Array(Type.String({ description: "Canonical authority directory." }), { minItems: 1, maxItems: MAX_ITEMS }),
+  labels: Type.Array(Type.Object({
+    name: Type.String(),
+    definition: Type.String(),
+  }, { additionalProperties: false }), { minItems: 1, maxItems: MAX_ITEMS }),
+  precedence: Type.Union([
+    Type.Literal("none"),
+    Type.Array(Type.String(), { minItems: 1, maxItems: MAX_ITEMS }),
+  ]),
+  disposition_rules: Type.Array(Type.Object({
+    artifact_type: Type.String(),
+    rule: Type.String(),
+  }, { additionalProperties: false }), { minItems: 1, maxItems: MAX_ITEMS }),
+  reference_evidence: Type.Array(Type.Object({
+    artifact: Type.String(),
+    references: Type.Array(Type.String(), { minItems: 1, maxItems: MAX_REFERENCE_HITS }),
+  }, { additionalProperties: false }), { minItems: 1, maxItems: MAX_ITEMS }),
+  run_in_background: Type.Optional(Type.Boolean({ description: "Run this valid audit in the background." })),
+}, { additionalProperties: false });
+
+/** Identify the one role protected by typed documentation-audit admission. */
+export function isDocumentationAuditorType(type: string): boolean {
+  return type.trim().toLowerCase() === "documentation-auditor";
+}
+
 /** Validate, canonicalize, and render the one supported documentation-audit request. */
 export function prepareDocumentationAudit(request: unknown): DocumentationAuditResult {
   if (!isRecord(request)) return { error: "audit_documents requires an object." };
+  if (!Value.Check(DOCUMENTATION_AUDIT_PARAMETERS, request)) {
+    return { error: "audit_documents has an invalid typed shape." };
+  }
 
   const description = requiredText(request.description, "description", 160);
   const objective = requiredText(request.objective, "objective", MAX_TEXT_LENGTH);

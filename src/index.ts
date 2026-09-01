@@ -23,7 +23,7 @@ import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, get
 import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
-import { prepareDocumentationAudit } from "./documentation-audit.js";
+import { DOCUMENTATION_AUDIT_PARAMETERS, isDocumentationAuditorType, prepareDocumentationAudit } from "./documentation-audit.js";
 import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
@@ -496,7 +496,7 @@ export default function (pi: ExtensionAPI) {
     // envelopes at the RPC boundary. Reload first so an agent file added mid
     // session is spawnable here too, not only through the Agent tool.
     reloadCustomAgents();
-    if (type.trim().toLowerCase() === "documentation-auditor") {
+    if (isDocumentationAuditorType(type)) {
       throw new Error("documentation-auditor can only be started through audit_documents.");
     }
     const dispatch = resolveSpawnType(type);
@@ -914,29 +914,7 @@ export default function (pi: ExtensionAPI) {
     label: "Audit Documents",
     description: "Audit a finite documentation manifest through the documentation-auditor role.",
     promptSnippet: "Audit a finite documentation manifest",
-    parameters: Type.Object({
-      description: Type.String({ description: "Three to five word UI label." }),
-      objective: Type.String({ description: "Non-empty documentation audit objective." }),
-      manifest: Type.Array(Type.String({ description: "Exact absolute readable artifact path." }), { minItems: 1, maxItems: 32 }),
-      authority_roots: Type.Array(Type.String({ description: "Canonical authority directory." }), { minItems: 1, maxItems: 32 }),
-      labels: Type.Array(Type.Object({
-        name: Type.String(),
-        definition: Type.String(),
-      }), { minItems: 1, maxItems: 32 }),
-      precedence: Type.Union([
-        Type.Literal("none"),
-        Type.Array(Type.String(), { minItems: 1, maxItems: 32 }),
-      ]),
-      disposition_rules: Type.Array(Type.Object({
-        artifact_type: Type.String(),
-        rule: Type.String(),
-      }), { minItems: 1, maxItems: 32 }),
-      reference_evidence: Type.Array(Type.Object({
-        artifact: Type.String(),
-        references: Type.Array(Type.String(), { minItems: 1, maxItems: 64 }),
-      }), { minItems: 1, maxItems: 32 }),
-      run_in_background: Type.Optional(Type.Boolean({ description: "Run this valid audit in the background." })),
-    }),
+    parameters: DOCUMENTATION_AUDIT_PARAMETERS,
     execute: async (toolCallId, params, signal, _onUpdate, ctx) => {
       const prepared = prepareDocumentationAudit(params);
       if ("error" in prepared) return textResult(prepared.error);
@@ -1282,7 +1260,7 @@ Terse command-style prompts produce shallow, generic work.
       reloadCustomAgents();
 
       const rawType = params.subagent_type as SubagentType;
-      if (!params.resume && rawType.trim().toLowerCase() === "documentation-auditor") {
+      if (!params.resume && isDocumentationAuditorType(rawType)) {
         return textResult("documentation-auditor can only be started through audit_documents.");
       }
       // Single decision point for dispatch (#183): unknown, disabled and
