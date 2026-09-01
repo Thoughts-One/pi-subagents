@@ -1,24 +1,186 @@
-/** usage.ts — Token usage: shapes, accumulator operators, session-stats readers. */
+/** usage.ts — Attributed token usage, durable snapshots, and session-stat readers. */
 
-/**
- * Lifetime usage components, accumulated via `message_end` events. Survives
- * compaction (which replaces session.state.messages and would reset any
- * stats-derived sum). cacheRead is excluded because each turn's cacheRead is
- * the cumulative cached prefix re-read on that one call — summing across
- * turns counts the prefix N times. See issue #38.
- */
-export type LifetimeUsage = { input: number; output: number; cacheWrite: number };
+import type { AssistantMessage, ToolResultMessage, Usage } from "@earendil-works/pi-ai";
 
-/** Sum of lifetime usage components, or 0 if undefined. */
-export function getLifetimeTotal(u?: LifetimeUsage): number {
-  return u ? u.input + u.output + u.cacheWrite : 0;
+/** A concrete provider/model identity. */
+export interface UsageModelIdentity {
+  provider: string;
+  model: string;
 }
 
-/** Add a usage delta into a target accumulator (mutates target). */
-export function addUsage(into: LifetimeUsage, delta: LifetimeUsage): void {
-  into.input += delta.input;
-  into.output += delta.output;
-  into.cacheWrite += delta.cacheWrite;
+/** Provider-reported usage and cost components for one model call. */
+export interface UsageComponents {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  };
+}
+
+/** Cumulative usage for one attributed model or one explicitly unattributed tool. */
+export interface UsageBucket extends UsageComponents {
+  calls: number;
+}
+
+/**
+ * Content-free cumulative accounting state. `models` is keyed by
+ * `provider/model`; `unattributedTools` keeps a tool's usage visible when its
+ * result supplies no explicit model identity.
+ */
+export interface LifetimeUsage {
+  schemaVersion: 1;
+  cumulative: true;
+  models: Record<string, UsageBucket>;
+  unattributedTools: Record<string, UsageBucket>;
+}
+
+export type AttributedUsageEvent =
+  | { kind: "model"; model: UsageModelIdentity; usage: UsageComponents }
+  | { kind: "unattributedTool"; toolName: string; usage: UsageComponents };
+
+function number(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function usageComponents(usage: Partial<Usage> | undefined): UsageComponents | undefined {
+  if (!usage) return undefined;
+  return {
+    input: number(usage.input),
+    output: number(usage.output),
+    cacheRead: number(usage.cacheRead),
+    cacheWrite: number(usage.cacheWrite),
+    cost: {
+      input: number(usage.cost?.input),
+      output: number(usage.cost?.output),
+      cacheRead: number(usage.cost?.cacheRead),
+      cacheWrite: number(usage.cost?.cacheWrite),
+      total: number(usage.cost?.total),
+    },
+  };
+}
+
+function emptyBucket(): UsageBucket {
+  return {
+    calls: 0,
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+}
+
+/** Create a durable, cumulative usage accumulator. */
+export function createLifetimeUsage(): LifetimeUsage {
+  return { schemaVersion: 1, cumulative: true, models: {}, unattributedTools: {} };
+}
+
+/** Convert an assistant response into an attributed usage event. */
+export function assistantUsageEvent(message: Pick<AssistantMessage, "provider" | "model" | "usage">): AttributedUsageEvent | undefined {
+  const usage = usageComponents(message.usage);
+  if (!usage) return undefined;
+  return {
+    kind: "model",
+    model: { provider: message.provider, model: message.model },
+    usage,
+  };
+}
+
+function explicitToolModel(details: unknown): UsageModelIdentity | undefined {
+  if (!details || typeof details !== "object") return undefined;
+  const usageModel = (details as { usageModel?: unknown }).usageModel;
+  if (!usageModel || typeof usageModel !== "object") return undefined;
+  const identity = usageModel as { provider?: unknown; id?: unknown; model?: unknown };
+  const model = typeof identity.id === "string" ? identity.id : identity.model;
+  if (
+    typeof identity.provider === "string" && identity.provider.length > 0
+    && typeof model === "string" && model.length > 0
+  ) {
+    return { provider: identity.provider, model };
+  }
+  return undefined;
+}
+
+/**
+ * Convert a usage-bearing tool result into an event. Pi 0.84 puts usage at the
+ * message top level. Older runtimes put it in details.usage. Attribution accepts
+ * only details.usageModel with a provider plus model or id; missing or unknown
+ * identities remain in that tool's unattributed bucket.
+ */
+export function toolResultUsageEvent(
+  message: Pick<ToolResultMessage, "toolName" | "details"> & { usage?: Partial<Usage> },
+): AttributedUsageEvent | undefined {
+  const detailsUsage = message.details && typeof message.details === "object"
+    ? (message.details as { usage?: Partial<Usage> }).usage
+    : undefined;
+  const usage = usageComponents(message.usage !== undefined ? message.usage : detailsUsage);
+  if (!usage) return undefined;
+  const model = explicitToolModel(message.details);
+  return model
+    ? { kind: "model", model, usage }
+    : { kind: "unattributedTool", toolName: message.toolName, usage };
+}
+
+/** Add one attributed usage event into its cumulative bucket. */
+export function addUsage(into: LifetimeUsage, event: AttributedUsageEvent): void {
+  const buckets = event.kind === "model" ? into.models : into.unattributedTools;
+  const key = event.kind === "model" ? `${event.model.provider}/${event.model.model}` : event.toolName;
+  let bucket = buckets[key];
+  if (!bucket) {
+    bucket = emptyBucket();
+    buckets[key] = bucket;
+  }
+  bucket.calls++;
+  bucket.input += event.usage.input;
+  bucket.output += event.usage.output;
+  bucket.cacheRead += event.usage.cacheRead;
+  bucket.cacheWrite += event.usage.cacheWrite;
+  bucket.cost.input += event.usage.cost.input;
+  bucket.cost.output += event.usage.cost.output;
+  bucket.cost.cacheRead += event.usage.cost.cacheRead;
+  bucket.cost.cacheWrite += event.usage.cost.cacheWrite;
+  bucket.cost.total += event.usage.cost.total;
+}
+
+/** Aggregate content-free cumulative components across all buckets. */
+export function getLifetimeComponents(usage?: LifetimeUsage): UsageComponents {
+  const total: UsageComponents = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+  if (!usage) return total;
+  for (const bucket of Object.values(usage.models).concat(Object.values(usage.unattributedTools))) {
+    total.input += bucket.input;
+    total.output += bucket.output;
+    total.cacheRead += bucket.cacheRead;
+    total.cacheWrite += bucket.cacheWrite;
+    total.cost.input += bucket.cost.input;
+    total.cost.output += bucket.cost.output;
+    total.cost.cacheRead += bucket.cost.cacheRead;
+    total.cost.cacheWrite += bucket.cost.cacheWrite;
+    total.cost.total += bucket.cost.total;
+  }
+  return total;
+}
+
+/** Sum the existing UI total: input + output + cache write, never cache read. */
+export function getLifetimeTotal(usage?: LifetimeUsage): number {
+  const total = getLifetimeComponents(usage);
+  return total.input + total.output + total.cacheWrite;
+}
+
+/** Create an independent durable snapshot of the mutable usage accumulator. */
+export function snapshotLifetimeUsage(usage: LifetimeUsage): LifetimeUsage {
+  return structuredClone(usage);
 }
 
 /** Minimal shape we read from upstream `getSessionStats()`. */
@@ -30,16 +192,7 @@ export type SessionLike = { getSessionStats(): SessionStatsLike };
 
 /**
  * Session-scoped token count: input + output + cacheWrite as reported by
- * upstream `getSessionStats().tokens` for the *current* session window.
- *
- * RESETS at compaction — upstream replaces `session.state.messages` and the
- * stats are derived from that array. For a lifetime total that survives
- * compaction, use `getLifetimeTotal(lifetimeUsage)` instead, which reads
- * from an independent accumulator fed by `message_end` events.
- *
- * Avoids upstream's `tokens.total` field, which sums per-turn `cacheRead`
- * and so counts the cumulative cached prefix N times across N turns
- * (issue #38).
+ * upstream `getSessionStats()` for the current session window.
  */
 export function getSessionTokens(session: SessionLike | undefined): number {
   if (!session) return 0;
@@ -49,10 +202,7 @@ export function getSessionTokens(session: SessionLike | undefined): number {
   } catch { return 0; }
 }
 
-/**
- * Context-window utilization (0–100), or null when unavailable
- * (no model contextWindow, or post-compaction before the next response).
- */
+/** Context-window utilization (0–100), or null when unavailable. */
 export function getSessionContextPercent(session: SessionLike | undefined): number | null {
   if (!session) return null;
   try { return session.getSessionStats().contextUsage?.percent ?? null; }

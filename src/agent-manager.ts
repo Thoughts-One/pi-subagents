@@ -22,7 +22,7 @@ import {
 import { resolveModel } from "./model-resolver.js";
 import { validateResultContract } from "./result-contract.js";
 import type { AgentInvocation, AgentRecord, DocumentationAuditAdmission, IsolationMode, ModelAuthority, SubagentType, ThinkingLevel } from "./types.js";
-import { addUsage } from "./usage.js";
+import { type AttributedUsageEvent, addUsage, createLifetimeUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
 
 export type OnAgentComplete = (record: AgentRecord) => void;
@@ -145,8 +145,8 @@ interface SpawnOptions {
   onSessionCreated?: (session: AgentSession) => void;
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
-  /** Called once per assistant message_end with that message's usage delta. */
-  onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
+  /** Called for each attributed assistant, tool-result, or compaction usage event. */
+  onUsage?: (event: AttributedUsageEvent) => void;
   /** Called when the session successfully compacts. */
   onCompaction?: (info: CompactionInfo) => void;
   /** Nesting depth: top-level subagent = 1. */
@@ -244,7 +244,8 @@ export class AgentManager {
       toolUses: 0,
       startedAt: Date.now(),
       abortController,
-      lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
+      lifetimeUsage: createLifetimeUsage(),
+      initialModel: resolvedModel ? { provider: resolvedModel.provider, model: resolvedModel.id } : undefined,
       compactionCount: 0,
       // Raw tri-state (not coerced to a boolean): true = background, false =
       // foreground (has an inline tool-result surface), undefined = caller never
@@ -353,9 +354,9 @@ export class AgentManager {
       },
       onTurnEnd: options.onTurnEnd,
       onTextDelta: options.onTextDelta,
-      onAssistantUsage: (usage) => {
-        addUsage(record.lifetimeUsage, usage);
-        options.onAssistantUsage?.(usage);
+      onUsage: (event) => {
+        addUsage(record.lifetimeUsage, event);
+        options.onUsage?.(event);
       },
       onCompaction: (info) => {
         record.compactionCount++;
@@ -581,8 +582,8 @@ export class AgentManager {
         onToolActivity: (activity) => {
           if (activity.type === "end") record.toolUses++;
         },
-        onAssistantUsage: (usage) => {
-          addUsage(record.lifetimeUsage, usage);
+        onUsage: (event) => {
+          addUsage(record.lifetimeUsage, event);
         },
         onCompaction: (info) => {
           record.compactionCount++;

@@ -4,7 +4,7 @@
 
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import type { LifetimeUsage } from "./usage.js";
+import type { LifetimeUsage, UsageModelIdentity } from "./usage.js";
 
 export type { ThinkingLevel };
 
@@ -155,12 +155,10 @@ export interface AgentRecord {
   outputFile?: string;
   /** Cleanup function for the output file stream subscription. */
   outputCleanup?: () => void;
-  /**
-   * Lifetime usage breakdown, accumulated via `message_end` events. Survives
-   * compaction. Total = input + output + cacheWrite (cacheRead deliberately
-   * excluded — see issue #38). Initialized to zeros at spawn.
-   */
+  /** Content-free, model-bucketed cumulative usage for this agent and its nested descendants. */
   lifetimeUsage: LifetimeUsage;
+  /** Model resolved before this agent started, retained even if the session fails before a response. */
+  initialModel?: UsageModelIdentity;
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
   compactionCount: number;
   /**

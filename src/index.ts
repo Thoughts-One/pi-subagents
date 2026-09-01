@@ -54,7 +54,7 @@ import {
 } from "./ui/agent-widget.js";
 import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
-import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
+import { type AttributedUsageEvent, addUsage, createLifetimeUsage, getLifetimeComponents, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, snapshotLifetimeUsage } from "./usage.js";
 
 // ---- Shared helpers ----
 
@@ -93,7 +93,7 @@ function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
     maxTurns,
     responseText: "",
     session: undefined,
-    lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
+    lifetimeUsage: createLifetimeUsage(),
   };
 
   const callbacks = {
@@ -119,8 +119,8 @@ function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
     onSessionCreated: (session: any) => {
       state.session = session;
     },
-    onAssistantUsage: (usage: { input: number; output: number; cacheWrite: number }) => {
-      addUsage(state.lifetimeUsage, usage);
+    onUsage: (event: AttributedUsageEvent) => {
+      addUsage(state.lifetimeUsage, event);
       onStreamUpdate?.();
     },
   };
@@ -381,8 +381,8 @@ export default function (pi: ExtensionAPI) {
     // so they survive compaction together — input + output ≤ total always.
     // tokens is omitted when nothing was ever produced (e.g. agent errored before
     // any message_end fired), preserving prior payload shape.
-    const u = record.lifetimeUsage;
-    const total = getLifetimeTotal(u);
+    const u = getLifetimeComponents(record.lifetimeUsage);
+    const total = getLifetimeTotal(record.lifetimeUsage);
     const tokens = total > 0
       ? { input: u.input, output: u.output, total }
       : undefined;
@@ -419,6 +419,8 @@ export default function (pi: ExtensionAPI) {
       id: record.id, type: record.type, description: record.description,
       status: record.status, result: record.result, error: record.error,
       startedAt: record.startedAt, completedAt: record.completedAt,
+      initialModel: record.initialModel,
+      usage: snapshotLifetimeUsage(record.lifetimeUsage),
     });
 
     // Skip notification if result was already consumed via get_subagent_result

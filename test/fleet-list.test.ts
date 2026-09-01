@@ -4,6 +4,7 @@ import type { AgentManager } from "../src/agent-manager.js";
 import type { AgentRecord } from "../src/types.js";
 import { getDisplayName } from "../src/ui/agent-widget.js";
 import { FleetList, type FleetUICtx, formatFleetElapsed, formatFleetTokens } from "../src/ui/fleet-list.js";
+import { createLifetimeUsage } from "../src/usage.js";
 
 // ---- Key sequences (see node_modules/@earendil-works/pi-tui/dist/keys.js) ----
 const DOWN = "\x1b[B";
@@ -20,6 +21,21 @@ const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: str
 /** A no-op session so a record is "openable" by default (the list hides session-less agents). */
 const FAKE_SESSION = { subscribe: () => () => {}, messages: [] };
 
+function makeLifetimeUsage(input: number) {
+  const usage = createLifetimeUsage();
+  if (input > 0) {
+    usage.models["test/model"] = {
+      calls: 1,
+      input,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    };
+  }
+  return usage;
+}
+
 function makeRecord(over: Partial<AgentRecord> = {}): AgentRecord {
   return {
     id: "a1",
@@ -29,7 +45,7 @@ function makeRecord(over: Partial<AgentRecord> = {}): AgentRecord {
     toolUses: 0,
     startedAt: Date.now(),
     session: FAKE_SESSION as any,
-    lifetimeUsage: { input: 13100, output: 0, cacheWrite: 0 },
+    lifetimeUsage: makeLifetimeUsage(13_100),
     compactionCount: 0,
     ...over,
   } as AgentRecord;

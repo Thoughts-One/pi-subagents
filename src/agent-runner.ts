@@ -28,6 +28,7 @@ import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import type { ModelAuthority, SubagentType, ThinkingLevel } from "./types.js";
+import { type AttributedUsageEvent, assistantUsageEvent, toolResultUsageEvent } from "./usage.js";
 
 /**
  * Tool names registered by THIS extension. Single source of truth so the
@@ -363,12 +364,8 @@ export interface RunOptions {
   onSessionCreated?: (session: AgentSession) => void;
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
-  /**
-   * Called once per assistant message_end with that message's usage delta.
-   * Lets callers maintain a lifetime accumulator that survives compaction
-   * (which replaces session.state.messages and resets stats-derived sums).
-   */
-  onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
+  /** Called for each attributed assistant, tool-result, or compaction usage event. */
+  onUsage?: (event: AttributedUsageEvent) => void;
   /**
    * Called when the session successfully compacts. `tokensBefore` is upstream's
    * pre-compaction context size estimate. Aborted compactions don't fire.
@@ -484,6 +481,43 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
   if (sessionDir === "~" || sessionDir.startsWith("~/")) return resolve(homedir(), sessionDir.slice(2));
   if (isAbsolute(sessionDir)) return sessionDir;
   return resolve(cwd, sessionDir);
+}
+
+/**
+ * Compaction calls the selected model through the session's stream function,
+ * but Pi's compaction result carries only summary content. Capture the completed
+ * model responses while a compaction is active and commit them only after the
+ * matching successful `compaction_end`; failed or aborted compactions contribute
+ * no snapshot event.
+ */
+function installCompactionUsageCapture(
+  session: AgentSession,
+  onUsage: ((event: AttributedUsageEvent) => void) | undefined,
+): void {
+  const originalStream = session.agent.streamFn;
+  if (!originalStream || !onUsage) return;
+
+  let pending: AttributedUsageEvent[] | undefined;
+  session.agent.streamFn = async (...args) => {
+    const stream = await originalStream(...args);
+    const result = stream.result.bind(stream);
+    stream.result = async () => {
+      const response = await result();
+      const usage = assistantUsageEvent(response);
+      if (pending && usage) pending.push(usage);
+      return response;
+    };
+    return stream;
+  };
+
+  session.subscribe((event) => {
+    if (event.type === "compaction_start") pending = [];
+    if (event.type === "compaction_end") {
+      const captured = pending;
+      pending = undefined;
+      if (!event.aborted && event.result) captured?.forEach(onUsage);
+    }
+  });
 }
 
 export async function runAgent(
@@ -839,6 +873,7 @@ export async function runAgent(
   }
 
   const { session } = await runInChildSessionContext(() => createAgentSession(sessionOpts));
+  installCompactionUsageCapture(session, options.onUsage);
 
   const baseSessionName = agentConfig?.name ?? type;
   session.setSessionName(
@@ -912,12 +947,12 @@ export async function runAgent(
       options.onToolActivity?.({ type: "end", toolName: event.toolName });
     }
     if (event.type === "message_end" && event.message.role === "assistant") {
-      const u = (event.message as any).usage;
-      if (u) options.onAssistantUsage?.({
-        input: u.input ?? 0,
-        output: u.output ?? 0,
-        cacheWrite: u.cacheWrite ?? 0,
-      });
+      const usage = assistantUsageEvent(event.message);
+      if (usage) options.onUsage?.(usage);
+    }
+    if (event.type === "message_end" && event.message.role === "toolResult") {
+      const usage = toolResultUsageEvent(event.message);
+      if (usage) options.onUsage?.(usage);
     }
     if (event.type === "compaction_end" && !event.aborted && event.result) {
       options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
@@ -959,7 +994,7 @@ export async function resumeAgent(
   prompt: string,
   options: {
     onToolActivity?: (activity: ToolActivity) => void;
-    onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
+    onUsage?: (event: AttributedUsageEvent) => void;
     onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
     signal?: AbortSignal;
   } = {},
@@ -971,17 +1006,17 @@ export async function resumeAgent(
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
 
-  const unsubEvents = (options.onToolActivity || options.onAssistantUsage || options.onCompaction)
+  const unsubEvents = (options.onToolActivity || options.onUsage || options.onCompaction)
     ? session.subscribe((event: AgentSessionEvent) => {
         if (event.type === "tool_execution_start") options.onToolActivity?.({ type: "start", toolName: event.toolName });
         if (event.type === "tool_execution_end") options.onToolActivity?.({ type: "end", toolName: event.toolName });
         if (event.type === "message_end" && event.message.role === "assistant") {
-          const u = (event.message as any).usage;
-          if (u) options.onAssistantUsage?.({
-            input: u.input ?? 0,
-            output: u.output ?? 0,
-            cacheWrite: u.cacheWrite ?? 0,
-          });
+          const usage = assistantUsageEvent(event.message);
+          if (usage) options.onUsage?.(usage);
+        }
+        if (event.type === "message_end" && event.message.role === "toolResult") {
+          const usage = toolResultUsageEvent(event.message);
+          if (usage) options.onUsage?.(usage);
         }
         if (event.type === "compaction_end" && !event.aborted && event.result) {
           options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });

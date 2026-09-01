@@ -658,6 +658,12 @@ disallowed_tools: write, edit
 
 This is useful for creating agents that inherit extension tools but should not have write access.
 
+## Usage Accounting
+
+Each terminal top-level subagent appends one content-free `subagents:record` usage snapshot to the root session. `initialModel` records the resolved child model. `usage` is versioned and cumulative: `models` is keyed by actual `provider/model`, and `unattributedTools` keeps usage-bearing nested tool results visible when they supply no explicit model identity.
+
+Nested tool attribution requires `details.usageModel` with `provider` plus `model` or `id`. Unqualified tool receipts stay in their tool-scoped unattributed bucket. Records contain call counts, input, output, cache-read, cache-write, and provider-reported cost components. They include assistant responses, successful compactions, nested tool results, and nested-agent usage folded into each visible ancestor. Consumers must select the latest record for each agent ID, not sum record revisions. The UI lifetime token total continues to exclude cache reads.
+
 ## Architecture
 
 ```
