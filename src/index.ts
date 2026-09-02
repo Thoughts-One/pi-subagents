@@ -790,6 +790,7 @@ export default function (pi: ExtensionAPI) {
       model: Model<any> | undefined;
       modelAuthority: { configuredModel: string | undefined };
       effectiveMaxTurns: number | undefined;
+      cwd: string | undefined;
     } {
     const invocation = resolveAgentInvocationConfig(config, params);
     let model = ctx.model;
@@ -813,6 +814,7 @@ export default function (pi: ExtensionAPI) {
       model,
       modelAuthority: { configuredModel: config?.model },
       effectiveMaxTurns: normalizeMaxTurns(invocation.maxTurns ?? getDefaultMaxTurns()),
+      cwd: typeof params.cwd === "string" ? params.cwd : undefined,
     };
   }
 
@@ -857,6 +859,7 @@ export default function (pi: ExtensionAPI) {
       inheritContext: prepared.invocation.inheritContext,
       thinkingLevel: prepared.invocation.thinking,
       isolation: prepared.invocation.isolation,
+      cwd: prepared.cwd,
       invocation: invocationOverride ?? {
         thinking: prepared.invocation.thinking,
         maxTurns: normalizeMaxTurns(prepared.invocation.maxTurns),
@@ -983,6 +986,7 @@ export default function (pi: ExtensionAPI) {
           'Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). ' +
           'Formats: 6-field cron ("0 0 9 * * 1" = 9am Mon), interval ("5m"/"1h"), one-shot ("+10m" or ISO). ' +
           'Forces run_in_background; incompatible with inherit_context and resume. Returns job ID.',
+        minLength: 1,
       }),
     ),
   };
@@ -1144,6 +1148,7 @@ Terse command-style prompts produce shallow, generic work.
       resume: Type.Optional(
         Type.String({
           description: "Optional agent ID to resume from. Continues from previous context.",
+          minLength: 1,
         }),
       ),
       isolated: Type.Optional(
@@ -1159,6 +1164,14 @@ Terse command-style prompts produce shallow, generic work.
       isolation: Type.Optional(
         Type.Literal("worktree", {
           description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
+        }),
+      ),
+      cwd: Type.Optional(
+        Type.String({
+          description:
+            "Absolute working directory for a fresh run. The agent's tools and environment use it; extensions, skills, settings, and memory remain anchored to the parent project. Incompatible with resume and schedule.",
+          minLength: 1,
+          maxLength: 4096,
         }),
       ),
       ...scheduleParam,
@@ -1262,6 +1275,12 @@ Terse command-style prompts produce shallow, generic work.
       reloadCustomAgents();
 
       const rawType = params.subagent_type as SubagentType;
+      if (params.cwd !== undefined && params.resume !== undefined) {
+        return textResult("Cannot combine `cwd` with `resume` — a resumed agent keeps its original working directory.");
+      }
+      if (params.cwd !== undefined && params.schedule !== undefined) {
+        return textResult("Cannot combine `cwd` with `schedule` — scheduled jobs keep the parent session working directory.");
+      }
       if (!params.resume && isDocumentationAuditorType(rawType)) {
         return textResult("documentation-auditor can only be started through audit_documents.");
       }
