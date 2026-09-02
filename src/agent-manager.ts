@@ -211,6 +211,14 @@ export class AgentManager {
     return this.maxConcurrent;
   }
 
+  /** Add usage to its owning record and every visible ancestor. */
+  private accumulateUsage(record: AgentRecord, event: AttributedUsageEvent): void {
+    for (let current: AgentRecord | undefined = record; current !== undefined; ) {
+      addUsage(current.lifetimeUsage, event);
+      current = current.parentAgentId === undefined ? undefined : this.agents.get(current.parentAgentId);
+    }
+  }
+
   /**
    * Spawn an agent and return its ID immediately (for background use).
    * If the concurrency limit is reached, the agent is queued.
@@ -361,7 +369,7 @@ export class AgentManager {
       onTurnEnd: options.onTurnEnd,
       onTextDelta: options.onTextDelta,
       onUsage: (event) => {
-        addUsage(record.lifetimeUsage, event);
+        this.accumulateUsage(record, event);
         options.onUsage?.(event);
       },
       onCompaction: (info) => {
@@ -589,7 +597,7 @@ export class AgentManager {
           if (activity.type === "end") record.toolUses++;
         },
         onUsage: (event) => {
-          addUsage(record.lifetimeUsage, event);
+          this.accumulateUsage(record, event);
         },
         onCompaction: (info) => {
           record.compactionCount++;

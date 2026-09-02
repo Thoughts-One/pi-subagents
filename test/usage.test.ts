@@ -110,6 +110,30 @@ describe("usage", () => {
       expect(getLifetimeTotal(lifetime)).toBe(38);
     });
 
+    it("keeps inherited-property tool names in independent unattributed buckets", () => {
+      const lifetime = createLifetimeUsage();
+      for (const toolName of ["constructor", "__proto__"]) {
+        addUsage(lifetime, toolResultUsageEvent({
+          toolName,
+          details: {
+            usage: {
+              input: 1,
+              output: 2,
+              cacheRead: 3,
+              cacheWrite: 4,
+              totalTokens: 10,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+          },
+        })!);
+      }
+
+      expect(Object.getPrototypeOf(lifetime.unattributedTools)).toBeNull();
+      expect(Object.keys(lifetime.unattributedTools).sort()).toEqual(["__proto__", "constructor"]);
+      expect(lifetime.unattributedTools.constructor).toMatchObject({ calls: 1, input: 1 });
+      expect(lifetime.unattributedTools.__proto__).toMatchObject({ calls: 1, input: 1 });
+    });
+
     it("uses the current top-level tool result usage before the legacy details fallback", () => {
       const event = toolResultUsageEvent({
         toolName: "Plan",

@@ -35,7 +35,6 @@ import type {
   ModelAuthority,
   ThinkingLevel,
 } from "./types.js";
-import { type AttributedUsageEvent, addUsage } from "./usage.js";
 
 /**
  * Hard ceiling on nesting for every branch: main session = 0, its subagents = 1,
@@ -62,7 +61,6 @@ interface NestedSpawnOptions {
   isolation?: IsolationMode;
   invocation?: AgentInvocation;
   signal?: AbortSignal;
-  onUsage?: (event: AttributedUsageEvent) => void;
   onSessionCreated?: (session: AgentSession) => void;
   depth: number;
   parentAgentId: string;
@@ -266,23 +264,6 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
           inheritContext: invocation.inheritContext,
           runInBackground: invocation.runInBackground,
           isolation: invocation.isolation,
-        },
-        // Nested children are hidden from every reporting surface, so their spend
-        // would otherwise be unattributable. Fold it into every ancestor's record:
-        // the top-level one appears in lifecycle events, completion notifications,
-        // and `/agents`, and those all read `lifetimeUsage`. The whole chain is
-        // walked, not just the immediate parent — a spawn callback only fires for
-        // that child's OWN turns, so stopping at one level would hide a
-        // great-grandchild from the only record anyone can see. (The live
-        // widget/fleet counters read their own per-agent activity tracker, which
-        // still sees only the top-level agent's own turns.)
-        onUsage: (event) => {
-          for (let id: string | undefined = context.parentAgentId; id !== undefined; ) {
-            const ancestor = context.manager.getRecord(id);
-            if (!ancestor) break;
-            addUsage(ancestor.lifetimeUsage, event);
-            id = ancestor.parentAgentId;
-          }
         },
         depth: childDepth,
         parentAgentId: context.parentAgentId,

@@ -611,6 +611,48 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     });
   });
 
+  it("propagates fresh and resumed nested usage through every ancestor", async () => {
+    manager = new AgentManager();
+    const session = mockSession();
+    const event = (input: number) => ({
+      kind: "model" as const,
+      model: { provider: "anthropic", model: "child" },
+      usage: {
+        input, output: 1, cacheRead: 2, cacheWrite: 3,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    });
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, prompt, opts: any) => {
+      if (prompt === "leaf") opts.onUsage?.(event(10));
+      return { responseText: "done", session, aborted: false, steered: false };
+    });
+
+    const topId = manager.spawn(mockPi, mockCtx, "general-purpose", "top", { description: "top", isBackground: true });
+    await manager.getRecord(topId)!.promise;
+    const middleId = manager.spawn(mockPi, mockCtx, "general-purpose", "middle", {
+      description: "middle", isBackground: true, parentAgentId: topId,
+    });
+    await manager.getRecord(middleId)!.promise;
+    const leafId = manager.spawn(mockPi, mockCtx, "general-purpose", "leaf", {
+      description: "leaf", isBackground: true, parentAgentId: middleId,
+    });
+    await manager.getRecord(leafId)!.promise;
+
+    for (const id of [topId, middleId, leafId]) {
+      expect(manager.getRecord(id)!.lifetimeUsage.models["anthropic/child"]).toMatchObject({ calls: 1, input: 10 });
+    }
+
+    vi.mocked(resumeAgent).mockImplementation(async (_session, _prompt, opts: any) => {
+      opts.onUsage?.(event(20));
+      return { text: "resumed" };
+    });
+    await manager.resume(leafId, "continue");
+
+    for (const id of [topId, middleId, leafId]) {
+      expect(manager.getRecord(id)!.lifetimeUsage.models["anthropic/child"]).toMatchObject({ calls: 2, input: 30 });
+    }
+  });
+
   it("onCompaction from runAgent increments record.compactionCount", async () => {
     manager = new AgentManager();
     const compactSeen: any[] = [];

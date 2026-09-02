@@ -78,7 +78,12 @@ function emptyBucket(): UsageBucket {
 
 /** Create a durable, cumulative usage accumulator. */
 export function createLifetimeUsage(): LifetimeUsage {
-  return { schemaVersion: 1, cumulative: true, models: {}, unattributedTools: {} };
+  return {
+    schemaVersion: 1,
+    cumulative: true,
+    models: Object.create(null) as Record<string, UsageBucket>,
+    unattributedTools: Object.create(null) as Record<string, UsageBucket>,
+  };
 }
 
 /** Convert an assistant response into an attributed usage event. */
