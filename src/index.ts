@@ -1116,7 +1116,7 @@ Terse command-style prompts produce shallow, generic work.
     renderCall(args, theme) {
       const displayName = args.subagent_type ? getDisplayName(args.subagent_type) : "Agent";
       const desc = args.description ?? "";
-      return new Text("▸ " + theme.fg("toolTitle", theme.bold(displayName)) + (desc ? "  " + theme.fg("muted", desc) : ""), 0, 0);
+      return new Text("▸ " + theme.fg("customMessageLabel", theme.bold(`[${displayName}]`)) + (desc ? "  " + theme.fg("muted", desc) : ""), 0, 0);
     },
 
     renderResult(result, { expanded, isPartial }, theme) {

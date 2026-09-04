@@ -92,6 +92,20 @@ describe("toolDescriptionMode", () => {
     expect(desc).toContain("very thorough");
   });
 
+  it("renders the bracketed role name with the custom-message label color", () => {
+    const tools = setup();
+    const fg = vi.fn((color: string, text: string) => `<${color}>${text}</${color}>`);
+    const rendered = tools.get("Agent").renderCall(
+      { subagent_type: "Explore", description: "Find package metadata" },
+      { fg, bold: (text: string) => `<b>${text}</b>` } as any,
+    );
+
+    expect(rendered.render(120)[0].trimEnd()).toBe(
+      "▸ <customMessageLabel><b>[Explore]</b></customMessageLabel>  <muted>Find package metadata</muted>",
+    );
+    expect(fg).toHaveBeenCalledWith("customMessageLabel", "<b>[Explore]</b>");
+  });
+
   it("compact mode swaps in the short description with one-line type list", () => {
     const tools = setup({ toolDescriptionMode: "compact" });
     const desc: string = tools.get("Agent").description;
