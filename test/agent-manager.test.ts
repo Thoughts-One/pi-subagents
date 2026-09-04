@@ -131,11 +131,11 @@ describe("AgentManager — governed top-level admission", () => {
     registerAgents(new Map([
       ["writer", {
         name: "writer", description: "first writer", builtinToolNames: ["write"],
-        extensions: false, skills: false, systemPrompt: "Write.", promptMode: "replace",
+        extensions: false, skills: false, systemPrompt: "Write.",
       }],
       ["reader", {
         name: "reader", description: "reader", builtinToolNames: ["read"],
-        extensions: false, skills: false, systemPrompt: "Read.", promptMode: "replace",
+        extensions: false, skills: false, systemPrompt: "Read.",
       }],
     ]));
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
@@ -153,7 +153,7 @@ describe("AgentManager — governed top-level admission", () => {
   it("rejects a resumed writer while another writer is active", async () => {
     registerAgents(new Map([["writer", {
       name: "writer", description: "writer", builtinToolNames: ["edit"],
-      extensions: false, skills: false, systemPrompt: "Write.", promptMode: "replace",
+      extensions: false, skills: false, systemPrompt: "Write.",
     }]]));
     manager = new AgentManager();
     resolvedRun();
@@ -175,7 +175,7 @@ describe("AgentManager — governed top-level admission", () => {
   it("keeps the writer reservation until an aborted execution settles", async () => {
     registerAgents(new Map([["writer", {
       name: "writer", description: "writer", builtinToolNames: ["write"],
-      extensions: false, skills: false, systemPrompt: "Write.", promptMode: "replace",
+      extensions: false, skills: false, systemPrompt: "Write.",
     }]]));
     let finish!: (value: any) => void;
     vi.mocked(runAgent)
@@ -203,7 +203,7 @@ describe("AgentManager — governed top-level admission", () => {
   it("rejects a concurrent resume of the same agent", async () => {
     registerAgents(new Map([["reader", {
       name: "reader", description: "reader", builtinToolNames: ["read"],
-      extensions: false, skills: false, systemPrompt: "Read.", promptMode: "replace",
+      extensions: false, skills: false, systemPrompt: "Read.",
     }]]));
     manager = new AgentManager();
     resolvedRun();
@@ -225,7 +225,7 @@ describe("AgentManager — governed top-level admission", () => {
   it("queues a top-level resume behind the concurrency limit", async () => {
     registerAgents(new Map([["reader", {
       name: "reader", description: "reader", builtinToolNames: ["read"],
-      extensions: false, skills: false, systemPrompt: "Read.", promptMode: "replace",
+      extensions: false, skills: false, systemPrompt: "Read.",
     }]]));
     manager = new AgentManager(undefined, 1);
     resolvedRun();
@@ -261,11 +261,11 @@ describe("AgentManager — governed top-level admission", () => {
     registerAgents(new Map([
       ["reader", {
         name: "reader", description: "reader", builtinToolNames: ["read"],
-        extensions: false, skills: false, systemPrompt: "Read.", promptMode: "replace",
+        extensions: false, skills: false, systemPrompt: "Read.",
       }],
       ["writer", {
         name: "writer", description: "writer", builtinToolNames: ["edit"],
-        extensions: false, skills: false, systemPrompt: "Write.", promptMode: "replace",
+        extensions: false, skills: false, systemPrompt: "Write.",
       }],
     ]));
     let finishBlocker!: (value: any) => void;
@@ -295,7 +295,7 @@ describe("AgentManager — governed top-level admission", () => {
   it("keeps persistence settings private to each manager", async () => {
     registerAgents(new Map([["reader", {
       name: "reader", description: "reader", builtinToolNames: ["read"],
-      extensions: false, skills: false, systemPrompt: "Read.", promptMode: "replace",
+      extensions: false, skills: false, systemPrompt: "Read.",
     }]]));
     resolvedRun();
     const firstManager = new AgentManager();
@@ -327,7 +327,7 @@ describe("AgentManager — governed top-level admission", () => {
     registerAgents(new Map([["nominal-writer", {
       name: "nominal-writer", description: "read-only", builtinToolNames: ["read", "write"],
       disallowedTools: ["write"], extensions: false, skills: false,
-      systemPrompt: "Read.", promptMode: "replace",
+      systemPrompt: "Read.",
     }]]));
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
     manager = new AgentManager();
@@ -343,7 +343,7 @@ describe("AgentManager — governed top-level admission", () => {
   it("queues a foreground child when a top-level slot is occupied", async () => {
     registerAgents(new Map([["reader", {
       name: "reader", description: "reader", builtinToolNames: ["read"],
-      extensions: false, skills: false, systemPrompt: "Read.", promptMode: "replace",
+      extensions: false, skills: false, systemPrompt: "Read.",
     }]]));
     let finishFirst: ((value: any) => void) | undefined;
     let finishSecond: ((value: any) => void) | undefined;
@@ -441,7 +441,7 @@ describe("AgentManager — nested runtime propagation", () => {
   it("starts a nested background child even when the concurrency pool is full", async () => {
     registerAgents(new Map([["reader", {
       name: "reader", description: "reader", builtinToolNames: ["read"],
-      extensions: false, skills: false, systemPrompt: "Read.", promptMode: "replace",
+      extensions: false, skills: false, systemPrompt: "Read.",
     }]]));
     // A parent holding the only slot and waiting on its own child would
     // otherwise deadlock: the child can never be drained from the queue.
@@ -605,7 +605,7 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
   it("clearCompleted does not remove running or queued agents", async () => {
     registerAgents(new Map([["reader", {
       name: "reader", description: "reader", builtinToolNames: ["read"],
-      extensions: false, skills: false, systemPrompt: "Read.", promptMode: "replace",
+      extensions: false, skills: false, systemPrompt: "Read.",
     }]]));
     // Use maxConcurrent=0 to keep agents queued, then spawn one running via foreground
     manager = new AgentManager(undefined, 1);
@@ -917,7 +917,6 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
       extensions: false,
       skills: false,
       systemPrompt: "Pinned.",
-      promptMode: "replace",
       model: "missing-provider/missing-model",
     }]]));
     manager = new AgentManager();
@@ -1407,7 +1406,6 @@ describe("AgentManager — result contracts", () => {
       extensions: false,
       skills: false,
       systemPrompt: "Plan.",
-      promptMode: "replace",
       resultContract: "plan-authority",
     }]]));
   }

@@ -109,7 +109,6 @@ max_turns: 30
 persist_session: true
 session_dir: .seams/pi-sessions/seam-plan-reviewer
 allowed_subagents: scout, reviewer
-prompt_mode: replace
 inherit_context: true
 run_in_background: true
 isolated: true
@@ -130,7 +129,6 @@ You are a security auditor.`);
     expect(agent.persistSession).toBe(true);
     expect(agent.sessionDir).toBe(".seams/pi-sessions/seam-plan-reviewer");
     expect(agent.allowedSubagents).toEqual(["scout", "reviewer"]);
-    expect(agent.promptMode).toBe("replace");
     expect(agent.inheritContext).toBe(true);
     expect(agent.runInBackground).toBe(true);
     expect(agent.isolated).toBe(true);
@@ -157,7 +155,6 @@ Just a prompt.`);
     expect(agent.persistSession).toBeUndefined();
     expect(agent.sessionDir).toBeUndefined();
     expect(agent.allowedSubagents).toBeUndefined();
-    expect(agent.promptMode).toBe("replace");
     expect(agent.inheritContext).toBeUndefined();
     expect(agent.runInBackground).toBeUndefined();
     expect(agent.isolated).toBeUndefined();
@@ -438,28 +435,6 @@ Negative turns.`);
 
     const result = loadCustomAgents(tmpDir);
     expect(result.get("negturns")!.maxTurns).toBeUndefined();
-  });
-
-  it("handles prompt_mode: append", () => {
-    writeAgent("appender", `---
-prompt_mode: append
----
-
-Extra instructions.`);
-
-    const result = loadCustomAgents(tmpDir);
-    expect(result.get("appender")!.promptMode).toBe("append");
-  });
-
-  it("defaults unknown prompt_mode to replace", () => {
-    writeAgent("badmode", `---
-prompt_mode: merge
----
-
-Unknown mode.`);
-
-    const result = loadCustomAgents(tmpDir);
-    expect(result.get("badmode")!.promptMode).toBe("replace");
   });
 
   it("loads multiple agents", () => {

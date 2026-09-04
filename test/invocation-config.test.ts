@@ -10,7 +10,6 @@ function makeConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     extensions: false,
     skills: false,
     systemPrompt: "Test agent",
-    promptMode: "replace",
     ...overrides,
   };
 }

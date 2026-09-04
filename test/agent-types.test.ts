@@ -31,7 +31,6 @@ function makeAgentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     extensions: false,
     skills: false,
     systemPrompt: "You are a test agent.",
-    promptMode: "replace",
     inheritContext: false,
     runInBackground: false,
     isolated: false,
@@ -186,7 +185,6 @@ describe("agent type registry", () => {
       const config = getConfig("general-purpose");
       expect(config.displayName).toBe("Agent");
       expect(config.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
-      expect(config.promptMode).toBe("append");
     });
   });
 

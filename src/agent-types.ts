@@ -307,7 +307,6 @@ export function getConfig(type: string): {
   extensions: true | string[] | false;
   excludeExtensions?: string[];
   skills: true | string[] | false;
-  promptMode: "replace" | "append";
 } {
   const key = resolveKey(type);
   const config = key ? agents.get(key) : undefined;
@@ -319,7 +318,6 @@ export function getConfig(type: string): {
       extensions: config.extensions,
       excludeExtensions: config.excludeExtensions,
       skills: config.skills,
-      promptMode: config.promptMode,
     };
   }
 
@@ -333,7 +331,6 @@ export function getConfig(type: string): {
       extensions: gp.extensions,
       excludeExtensions: gp.excludeExtensions,
       skills: gp.skills,
-      promptMode: gp.promptMode,
     };
   }
 
@@ -344,7 +341,6 @@ export function getConfig(type: string): {
     builtinToolNames: BUILTIN_TOOL_NAMES,
     extensions: true,
     skills: true,
-    promptMode: "append",
   };
 }
 

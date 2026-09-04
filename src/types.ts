@@ -50,8 +50,8 @@ export interface AgentConfig {
    * "all" = any enabled agent; string[] = only those agent types.
    */
   allowedSubagents?: "all" | string[];
+  /** Custom instructions supplied before Pi-loaded project context. */
   systemPrompt: string;
-  promptMode: "replace" | "append";
   /** Default for spawn: fork parent conversation. undefined = caller decides. */
   inheritContext?: boolean;
   /** Default for spawn: run in background. undefined = caller decides. */

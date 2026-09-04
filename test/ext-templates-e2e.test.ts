@@ -62,9 +62,6 @@ const SCENARIOS = readdirSync(TEMPLATES_DIR)
     };
   });
 
-/** Distinctive marker for the parent system prompt (prompt_mode: append asserts it leaks in). */
-const PARENT_PROMPT = "PARENT_PROMPT_MARKER";
-
 describe("ext: / tools: scoping — template-driven e2e (real pi-mono, headless)", () => {
   let prevAgentDir: string | undefined;
   let prevHome: string | undefined;
@@ -110,9 +107,7 @@ describe("ext: / tools: scoping — template-driven e2e (real pi-mono, headless)
       unregisterProvider: () => {},
     };
     // cwd = fixtures dir so the templates' relative extensions: paths resolve.
-    // getSystemPrompt returns a distinctive marker so prompt_mode: append can be
-    // proven to inherit the parent prompt.
-    const ctx: any = { cwd: FIXTURES_DIR, getSystemPrompt: () => PARENT_PROMPT, model, modelRegistry };
+    const ctx: any = { cwd: FIXTURES_DIR, model, modelRegistry };
     const pi: any = { exec: async () => ({ code: 1, stdout: "", stderr: "" }) };
 
     // Mirror production: the caller resolves frontmatter-locked fields (isolated,
@@ -131,7 +126,7 @@ describe("ext: / tools: scoping — template-driven e2e (real pi-mono, headless)
         inheritContext: resolved.inheritContext,
         onSessionCreated: (s) => {
           // Both fixed at construction (before any prompt turn): the gated tool
-          // set and the effective system prompt (built from prompt_mode + skills).
+          // set and the effective system prompt (role body plus preloaded skills).
           active = s.getActiveToolNames();
           prompt = s.systemPrompt;
         },

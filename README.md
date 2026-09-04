@@ -151,13 +151,13 @@ Group completions render each agent as a separate block. The LLM receives struct
 
 ## Default Agent Types
 
-| Type | Tools | Model | Prompt Mode | Description |
-|------|-------|-------|-------------|-------------|
-| `general-purpose` | all 7 | inherit | `append` (parent twin) | Inherits the parent's full system prompt — same rules, CLAUDE.md, project conventions |
-| `Explore` | read, bash, grep, find, ls | haiku (falls back to inherit) | `replace` (standalone) | Fast codebase exploration (read-only) |
-| `Plan` | read, bash, grep, find, ls | inherit | `replace` (standalone) | Software architect for implementation planning (read-only) |
+| Type | Tools | Model | Description |
+|------|-------|-------|-------------|
+| `general-purpose` | all 7 | inherit | General-purpose agent for complex, multi-step tasks |
+| `Explore` | read, bash, grep, find, ls | haiku (falls back to inherit) | Fast codebase exploration (read-only) |
+| `Plan` | read, bash, grep, find, ls | inherit | Software architect for implementation planning (read-only) |
 
-The `general-purpose` agent is a **parent twin** — it receives the parent's entire system prompt plus a sub-agent context bridge, so it follows the same rules the parent does. Explore and Plan use standalone prompts tailored to their read-only roles.
+Every child uses its role body as custom instructions and receives Pi-loaded `AGENTS.md` or `CLAUDE.md` context from its effective working directory. No child embeds the parent system prompt.
 
 Default agents can be **ejected** (`/agents` → select agent → Eject) to export them as `.md` files for customization, **overridden** by creating a `.md` file with the same name (e.g. `.pi/agents/general-purpose.md`), or **disabled** per-project with `enabled: false` frontmatter.
 
@@ -222,10 +222,9 @@ All fields are optional — sensible defaults for everything.
 | `persist_session` | `true` (or `subagents.json` `persistSession`) | Persist this subagent as a normal Pi session. Set `false` to keep it in memory. Role frontmatter overrides the manager-wide setting |
 | `session_dir` | `subagents.json` `sessionDir` or pi default | Optional session directory when `persist_session: true`; relative paths resolve from the agent cwd. Role frontmatter overrides the manager-wide setting |
 | `allowed_subagents` | none | Opt in to scoped nested `Agent`, `get_subagent_result`, and `steer_subagent` tools. Omitted / empty / `none` / `false` = no nesting; `all` (or `"*"` / `true`) = any enabled agent; comma-separated list = only those agent types |
-| `prompt_mode` | `replace` | `replace`: body is the full system prompt (no AGENTS.md / CLAUDE.md inheritance). `append`: body appended to parent's prompt (agent acts as a "parent twin" — inherits parent's AGENTS.md / CLAUDE.md) |
 | `inherit_context` | `false` | Fork parent conversation into agent |
 | `run_in_background` | `false` | Run in background by default |
-| `isolated` | `false` | Hermetic specialist mode: forces `extensions: false` + `skills: false` + drops `ext:` selectors. Only built-in tools. Distinct from `isolation: worktree` (filesystem) |
+| `isolated` | `false` | Hermetic tool boundary: forces `extensions: false` and drops `ext:` selectors. Only built-in tools. It does not suppress project context or role-owned skills. Distinct from `isolation: worktree` (filesystem) |
 | `enabled` | `true` | Set to `false` to disable an agent (useful for hiding a default agent per-project) |
 | `result_contract` | — | Set to `plan-authority` to require the Plan result's first line to be a valid Claude Fable receipt or disclosed Sol fallback receipt; an invalid result is retained as a package error |
 
@@ -277,7 +276,7 @@ exclude_extensions: pi-notify     # everything except pi-notify (with extensions
 extensions: [mcp]
 tools: "*, ext:mcp/search"
 
-isolated: true                    # hermetic: built-ins only, no extensions/skills/context
+isolated: true                    # hermetic tools: built-ins only, no extensions
 ```
 
 A few rules the examples don't make obvious:
@@ -303,7 +302,7 @@ Launch a sub-agent.
 | `prompt` | string | yes | The task for the agent |
 | `description` | string | yes | Short 3-5 word summary (shown in UI) |
 | `subagent_type` | string | yes | Agent type (built-in or custom) |
-| `cwd` | string | no | Absolute working directory for a fresh run. Tools and the environment use this directory, while `.pi` config stays anchored to the parent project. Incompatible with `resume` and `schedule` |
+| `cwd` | string | no | Absolute working directory for a fresh run. Tools and environment use this directory. Extensions, skills, settings, and memory stay anchored to the parent project, while `AGENTS.md` and `CLAUDE.md` load from this directory. Incompatible with `resume` and `schedule` |
 | `run_in_background` | boolean | no | Run without blocking unless role frontmatter fixes the execution mode |
 | `resume` | string | no | Agent ID to resume a previous session |
 
@@ -550,7 +549,7 @@ pi.events.emit("subagents:rpc:spawn", {
 
 `options.model` accepts either a `Model` object (e.g. `ctx.model`) or a `"provider/modelId"` string — strings are resolved against `ctx.modelRegistry` at the RPC boundary, so cross-extension callers can forward serializable values without losing auth context.
 
-`options.cwd` (absolute path to an existing directory — anything else returns an error envelope; `null` means unset) runs the agent in a different working directory than the parent session. Its tools operate there and the prompt's environment block describes it, but **`.pi` config still loads from the parent session's project** — the target directory's `.pi` extensions never execute, and its agents/skills/settings are not picked up. Combined with `isolation: "worktree"`, the worktree is created *from* the target directory's repo, the agent works at the equivalent subdirectory inside the copy (a monorepo-package cwd stays scoped to that package), and the resulting `pi-agent-*` branch lands in that repo — the completion message names it. On session end, worktree registrations are pruned in every repo that received one; only a hard crash can leave a stale entry (then: `git worktree prune` in the target repo). Agents with `memory:` keep reading/writing the parent project's memory.
+`options.cwd` (absolute path to an existing directory — anything else returns an error envelope; `null` means unset) runs the agent in a different working directory than the parent session. Its tools and project context files operate there, while **`.pi` config stays anchored to the parent session's project** — the target directory's `.pi` extensions never execute, and its agents, skills, settings, and memory are not picked up. Combined with `isolation: "worktree"`, the worktree is created *from* the target directory's repo, the agent works at the equivalent subdirectory inside the copy (a monorepo-package cwd stays scoped to that package), and the resulting `pi-agent-*` branch lands in that repo — the completion message names it. On session end, worktree registrations are pruned in every repo that received one; only a hard crash can leave a stale entry (then: `git worktree prune` in the target repo). Agents with `memory:` keep reading/writing the parent project's memory.
 
 ### Stop
 

@@ -163,6 +163,39 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     expect(toolResults[0]).not.toMatch(/Unknown agent type/i);
   });
 
+  it("loads foreign-cwd AGENTS.md context without copying the parent prompt", async () => {
+    const parentCwd = mkdtempSync(join(tmpdir(), "subagents-parent-context-"));
+    const foreignCwd = mkdtempSync(join(tmpdir(), "subagents-foreign-context-"));
+    tmpDirs.push(parentCwd, foreignCwd);
+    const FOREIGN_MARKER = "FOREIGN_CWD_AGENTS_MARKER";
+    const PARENT_MARKER = "PARENT_PROMPT_ONLY_MARKER";
+    writeFileSync(join(foreignCwd, "AGENTS.md"), FOREIGN_MARKER);
+
+    run = await runPrintMode({
+      prompt: "Delegate to the foreign directory.",
+      cwd: parentCwd,
+      systemPrompt: PARENT_MARKER,
+      respond: routeBySession({
+        parentInitial: agentCall({
+          subagent_type: "general-purpose",
+          description: "foreign context",
+          prompt: "Report your system context markers.",
+          cwd: foreignCwd,
+          run_in_background: false,
+        }),
+        parentFinal: "Reported.",
+        subagent: (ctx: Context) => {
+          const prompt = ctx.systemPrompt ?? "";
+          return `foreign=${prompt.includes(FOREIGN_MARKER)} parent=${prompt.includes(PARENT_MARKER)}`;
+        },
+      }),
+    });
+
+    const result = agentToolResults(run.parentSession).join("\n");
+    expect(result).toContain("foreign=true");
+    expect(result).toContain("parent=false");
+  });
+
   it("fails closed before child execution when a top-level frontmatter model is unavailable", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "subagents-fm-model-"));
     tmpDirs.push(cwd);

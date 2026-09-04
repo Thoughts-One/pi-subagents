@@ -20,8 +20,10 @@ export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
       // Setting them to false would lock callsite intent (see resolveAgentInvocationConfig in invocation-config.ts).
       extensions: true,
       skills: true,
-      systemPrompt: "",
-      promptMode: "append",
+      systemPrompt: `# Role
+You are a general-purpose coding agent for complex, multi-step tasks.
+You have full access to read, write, edit files, and execute commands.
+Do what has been asked; nothing more, nothing less.`,
       isDefault: true,
     },
   ],
@@ -66,7 +68,6 @@ Use Bash ONLY for read-only operations: ls, git status, git log, git diff, find,
 - Report findings as regular messages
 - Do not use emojis
 - Be thorough and precise`,
-      promptMode: "replace",
       isDefault: true,
     },
   ],
@@ -119,7 +120,6 @@ You are STRICTLY PROHIBITED from:
 ### Critical Files for Implementation
 List 3-5 files most critical for implementing this plan:
 - /absolute/path/to/file.ts - [Brief reason]`,
-      promptMode: "replace",
       isDefault: true,
     },
   ],

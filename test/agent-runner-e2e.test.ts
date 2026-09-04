@@ -79,7 +79,6 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
             builtinToolNames: BUILTINS,
             skills: false,
             systemPrompt: "You are e2e.",
-            promptMode: "replace",
             inheritContext: false,
             runInBackground: false,
             isolated: false,

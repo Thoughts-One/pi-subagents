@@ -308,7 +308,6 @@ describe("SubagentScheduler — fire path", () => {
       extensions: false,
       skills: false,
       systemPrompt: "Audit.",
-      promptMode: "replace",
     }]]));
     setFallbackSubagent("documentation-auditor");
 
@@ -325,10 +324,10 @@ describe("SubagentScheduler — fire path", () => {
   it("disables an armed job if its live fallback changes to documentation-auditor", () => {
     const configs = new Map([
       ["general-purpose", {
-        name: "general-purpose", description: "General", builtinToolNames: ["read"], extensions: false, skills: false, systemPrompt: "General.", promptMode: "replace",
+        name: "general-purpose", description: "General", builtinToolNames: ["read"], extensions: false, skills: false, systemPrompt: "General.",
       }],
       ["documentation-auditor", {
-        name: "documentation-auditor", description: "Documentation Auditor", builtinToolNames: ["read"], extensions: false, skills: false, systemPrompt: "Audit.", promptMode: "replace",
+        name: "documentation-auditor", description: "Documentation Auditor", builtinToolNames: ["read"], extensions: false, skills: false, systemPrompt: "Audit.",
       }],
     ] as const);
     registerAgents(configs as any);
@@ -413,7 +412,6 @@ describe("SubagentScheduler — fire path", () => {
       extensions: false,
       skills: false,
       systemPrompt: "Pinned.",
-      promptMode: "replace",
       model: "missing-provider/missing-model",
     }]]));
     const job = scheduler.addJob({
@@ -459,7 +457,6 @@ describe("SubagentScheduler — fire path", () => {
       extensions: false,
       skills: false,
       systemPrompt: "Run on schedule.",
-      promptMode: "replace",
       thinking: "high",
       maxTurns: 9,
       isolated: true,

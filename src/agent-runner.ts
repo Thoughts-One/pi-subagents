@@ -14,6 +14,7 @@ import {
   DefaultResourceLoader,
   type ExtensionAPI,
   getAgentDir,
+  loadProjectContextFiles,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -552,18 +553,15 @@ export async function runAgent(
 
   const env = await detectEnv(options.pi, effectiveCwd);
 
-  // Get parent system prompt for append-mode agents
-  const parentSystemPrompt = ctx.getSystemPrompt();
-
   // Build prompt extras (memory, skill preloading)
   const extras: PromptExtras = {};
 
-  // Resolve extensions/skills: isolated overrides to false
+  // Isolation constrains extension tools. Skills remain role-owned prompt input.
   const extensions = options.isolated ? false : config.extensions;
   // Nulling excludes under isolated also suppresses the orphaned-exclude warning —
   // isolation is an intentional override, not a misconfiguration.
   const excludeExtensions = options.isolated ? undefined : config.excludeExtensions;
-  const skills = options.isolated ? false : config.skills;
+  const skills = config.skills;
 
   // Skill preloading: when skills is string[], preload their content into prompt
   if (Array.isArray(skills)) {
@@ -599,13 +597,13 @@ export async function runAgent(
   // Build system prompt from agent config
   let systemPrompt: string;
   if (agentConfig) {
-    systemPrompt = buildAgentPrompt(agentConfig, effectiveCwd, env, parentSystemPrompt, extras);
+    systemPrompt = buildAgentPrompt(agentConfig, effectiveCwd, env, extras);
   } else {
     // Unknown type fallback: spread the canonical general-purpose config (defensive —
     // unreachable in practice since index.ts resolves unknown types before calling runAgent).
     const fallback = DEFAULT_AGENTS.get("general-purpose");
     if (!fallback) throw new Error(`No fallback config available for unknown type "${type}"`);
-    systemPrompt = buildAgentPrompt({ ...fallback, name: type }, effectiveCwd, env, parentSystemPrompt, extras);
+    systemPrompt = buildAgentPrompt({ ...fallback, name: type }, effectiveCwd, env, extras);
   }
 
   // When skills is string[], we've already preloaded them into the prompt.
@@ -622,11 +620,9 @@ export async function runAgent(
   //   "*" keeps all default-discovered extensions. Excluded extensions never
   //   bind handlers or register tools (their factory still runs once).
   //
-  // Suppress AGENTS.md/CLAUDE.md and APPEND_SYSTEM.md — upstream's
-  // buildSystemPrompt() re-appends both AFTER systemPromptOverride, which
-  // would defeat prompt_mode: replace and isolated: true. Parent context, if
-  // wanted, reaches the subagent via prompt_mode: append (parentSystemPrompt
-  // is embedded in systemPromptOverride) or inherit_context (conversation).
+  // Keep resource configuration anchored to configCwd, but load the project
+  // context chain from the directory where this child works. APPEND_SYSTEM.md
+  // remains suppressed because it carries parent-facing communication rules.
   // `ext:` selectors from the `tools:` CSV narrow which extension tools surface to
   // the LLM. They do NOT control loading — `extensions:` is the sole authority for
   // which extensions load. `ext:foo` against an extension that `extensions:` excluded
@@ -679,7 +675,9 @@ export async function runAgent(
     noSkills,
     noPromptTemplates: true,
     noThemes: true,
-    noContextFiles: true,
+    agentsFilesOverride: () => ({
+      agentsFiles: loadProjectContextFiles({ cwd: effectiveCwd, agentDir }),
+    }),
     systemPromptOverride: () => systemPrompt,
     appendSystemPromptOverride: () => [],
   });

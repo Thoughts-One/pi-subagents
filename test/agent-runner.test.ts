@@ -8,6 +8,7 @@ const {
   defaultResourceLoaderCtor,
   loaderExtensionsRef,
   getAgentDir,
+  loadProjectContextFiles,
   sessionManagerInMemory,
   sessionManagerCreate,
   settingsManagerCreate,
@@ -23,6 +24,7 @@ const {
     },
   },
   getAgentDir: vi.fn(() => "/mock/agent-dir"),
+  loadProjectContextFiles: vi.fn(() => [{ path: "/foreign/AGENTS.md", content: "foreign context" }]),
   sessionManagerInMemory: vi.fn(() => ({ kind: "memory-session-manager" })),
   sessionManagerCreate: vi.fn(() => ({ kind: "persistent-session-manager" })),
   settingsManagerGetSessionDir: vi.fn(() => undefined as string | undefined),
@@ -59,6 +61,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
     }
   },
   getAgentDir,
+  loadProjectContextFiles,
   SessionManager: { inMemory: sessionManagerInMemory, create: sessionManagerCreate },
   SettingsManager: { create: settingsManagerCreate },
 }));
@@ -71,7 +74,6 @@ vi.mock("../src/agent-types.js", () => ({
     builtinToolNames: ["read"],
     extensions: false,
     skills: false,
-    promptMode: "replace",
   })),
   getAgentConfig: vi.fn(() => ({
     name: "Explore",
@@ -80,7 +82,6 @@ vi.mock("../src/agent-types.js", () => ({
     extensions: false,
     skills: false,
     systemPrompt: "You are Explore.",
-    promptMode: "replace",
     inheritContext: false,
     runInBackground: false,
     isolated: false,
@@ -187,6 +188,7 @@ beforeEach(() => {
   createAgentSession.mockReset();
   defaultResourceLoaderCtor.mockClear();
   getAgentDir.mockClear();
+  loadProjectContextFiles.mockClear();
   sessionManagerInMemory.mockClear();
   sessionManagerCreate.mockClear();
   settingsManagerGetSessionDir.mockReset();
@@ -348,22 +350,24 @@ describe("agent-runner final output capture", () => {
     expect(createAgentSession.mock.calls[0][0]).not.toHaveProperty("modelRuntime");
   });
 
-  it("suppresses AGENTS.md/CLAUDE.md/APPEND_SYSTEM.md for subagents", async () => {
-    const { session } = createSession("ISOLATED");
+  it("loads project context from the effective cwd while suppressing APPEND_SYSTEM.md", async () => {
+    const { session } = createSession("CONTEXT");
     createAgentSession.mockResolvedValue({ session });
 
-    await runAgent(ctx, "Explore", "Say ISOLATED", { pi });
+    await runAgent(ctx, "Explore", "Say CONTEXT", { pi, cwd: "/foreign" });
 
-    // noContextFiles skips AGENTS.md/CLAUDE.md at the loader source;
-    // appendSystemPromptOverride suppresses APPEND_SYSTEM.md (no flag equivalent).
     expect(defaultResourceLoaderCtor).toHaveBeenCalledWith(
       expect.objectContaining({
-        noContextFiles: true,
+        cwd: "/foreign",
+        agentsFilesOverride: expect.any(Function),
         appendSystemPromptOverride: expect.any(Function),
       }),
     );
-    // The override returns an empty list so any loaded sources are discarded.
     const ctorArgs = defaultResourceLoaderCtor.mock.calls[0][0];
+    expect(ctorArgs.agentsFilesOverride({ agentsFiles: [] })).toEqual({
+      agentsFiles: [{ path: "/foreign/AGENTS.md", content: "foreign context" }],
+    });
+    expect(loadProjectContextFiles).toHaveBeenCalledWith({ cwd: "/foreign", agentDir: "/mock/agent-dir" });
     expect(ctorArgs.appendSystemPromptOverride(["would-be-loaded"])).toEqual([]);
   });
 
@@ -854,7 +858,6 @@ function makeAgentConfig(overrides: Record<string, unknown> = {}) {
     extensions: true as boolean | string[],
     skills: false as boolean | string[],
     systemPrompt: "Test.",
-    promptMode: "replace" as const,
     inheritContext: false,
     runInBackground: false,
     isolated: false,
@@ -869,7 +872,6 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     builtinToolNames: BUILTINS_7,
     extensions: true as boolean | string[],
     skills: false as boolean | string[],
-    promptMode: "replace" as const,
     ...overrides,
   };
 }

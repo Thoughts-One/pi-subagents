@@ -46,7 +46,6 @@ import {
   formatTokens,
   formatTurns,
   getDisplayName,
-  getPromptModeLabel,
   SPINNER,
   type Theme,
   type UICtx,
@@ -1273,16 +1272,13 @@ Terse command-style prompts produce shallow, generic work.
         runInBackground,
         isolation,
       };
-      // Tool-result render shows the mode label too; viewer's header already does.
-      const modeLabel = getPromptModeLabel(subagentType);
       const { tags: invocationTags } = buildInvocationTags(agentInvocation);
-      const agentTags = modeLabel ? [modeLabel, ...invocationTags] : invocationTags;
       const detailBase = {
         displayName,
         description: params.description,
         subagentType,
         modelName,
-        tags: agentTags.length > 0 ? agentTags : undefined,
+        tags: invocationTags.length > 0 ? invocationTags : undefined,
       };
 
       // ---- Schedule: register a job, don't spawn now ----
@@ -1914,7 +1910,6 @@ Terse command-style prompts produce shallow, generic work.
     if (cfg.allowedSubagents !== undefined) {
       fmFields.push(`allowed_subagents: ${cfg.allowedSubagents === "all" ? "all" : cfg.allowedSubagents.join(", ")}`);
     }
-    fmFields.push(`prompt_mode: ${cfg.promptMode}`);
     if (cfg.extensions === false) fmFields.push("extensions: false");
     else if (Array.isArray(cfg.extensions)) fmFields.push(`extensions: ${cfg.extensions.join(", ")}`);
     if (cfg.excludeExtensions?.length) fmFields.push(`exclude_extensions: ${cfg.excludeExtensions.join(", ")}`);
@@ -2043,7 +2038,6 @@ tools: <comma-separated built-in tools: read, bash, edit, write, grep, find, ls.
 model: <optional model as "provider/modelId", e.g. "anthropic/claude-haiku-4-5". Omit to inherit parent model>
 thinking: <optional thinking level: ${THINKING_LEVELS.join(", ")}. Omit to inherit>
 max_turns: <optional max agentic turns. 0 or omit for unlimited (default)>
-prompt_mode: <"replace" (body IS the full system prompt) or "append" (body is appended to default prompt). Default: replace>
 extensions: <true (inherit all MCP/extension tools), false (none), or comma-separated names. Default: true>
 skills: <true (inherit all), false (none), or comma-separated skill names to preload into prompt. Default: true>
 disallowed_tools: <comma-separated tool names to block, even if otherwise available. Omit for none>
@@ -2062,8 +2056,6 @@ isolation: <"worktree" to run in isolated git worktree. Omit for normal>
 Guidelines for choosing settings:
 - For read-only tasks (review, analysis): tools: read, bash, grep, find, ls
 - For code modification tasks: include edit, write
-- Use prompt_mode: append if the agent should keep the default system prompt and add specialization on top
-- Use prompt_mode: replace for fully custom agents with their own personality/instructions
 - Set persist_session: false when the child session must stay in memory
 - Only include frontmatter fields that differ from defaults — omit fields where the default is fine
 
@@ -2149,7 +2141,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
     const content = `---
 description: ${description}
 tools: ${tools}${modelLine}${thinkingLine}
-prompt_mode: replace
 ---
 
 ${systemPrompt}
