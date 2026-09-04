@@ -11,7 +11,10 @@
  * The fix: the first activation claims the slot, later activations leave it
  * alone, and only the owner's shutdown releases it.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
@@ -69,7 +72,21 @@ async function spawnBackground(tools: Map<string, any>): Promise<string> {
 
 // Restore the global slot around every test.
 const priorGlobal = (globalThis as any)[MANAGER_KEY];
+let agentDir: string;
+let priorAgentDir: string | undefined;
+
+beforeEach(() => {
+  agentDir = mkdtempSync(join(tmpdir(), "pi-manager-registry-agent-dir-"));
+  priorAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  mkdirSync(join(agentDir, "agents"), { recursive: true });
+  writeFileSync(join(agentDir, "agents", "general-purpose.md"), "---\ntools: read\n---\nRead.");
+});
+
 afterEach(() => {
+  if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+  rmSync(agentDir, { recursive: true, force: true });
   if (priorGlobal === undefined) delete (globalThis as any)[MANAGER_KEY];
   else (globalThis as any)[MANAGER_KEY] = priorGlobal;
   vi.mocked(runAgent).mockReset();

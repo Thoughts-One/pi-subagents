@@ -118,10 +118,11 @@ describe("toolDescriptionMode", () => {
     // One keyword per behavioral contract the orchestrator must know about.
     // If you change one of these behaviors, update BOTH descriptions.
     for (const contract of [
-      "run_in_background",
+      "foreground",
+      "background",
+      "Write-class",
       "resume",
       "steer_subagent",
-      'isolation: "worktree"',
       ".pi/agents/",
       "self-contained",
     ]) {

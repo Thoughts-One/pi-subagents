@@ -4,7 +4,10 @@
  * a string. Drives the registered `Agent` / `get_subagent_result` tools and
  * inspects the text delivered back, for a turn-limit abort and a user stop.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
@@ -60,7 +63,21 @@ function ctx() {
 const textOf = (r: any): string => r.content[0].text;
 
 describe("status note reaches the parent through the real handlers", () => {
+  let agentDir: string;
+  let priorAgentDir: string | undefined;
+
+  beforeEach(() => {
+    agentDir = mkdtempSync(join(tmpdir(), "pi-status-agent-dir-"));
+    priorAgentDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    mkdirSync(join(agentDir, "agents"), { recursive: true });
+    writeFileSync(join(agentDir, "agents", "general-purpose.md"), "---\ntools: read\n---\nRead.");
+  });
+
   afterEach(() => {
+    if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+    rmSync(agentDir, { recursive: true, force: true });
     delete (globalThis as any)[Symbol.for("pi-subagents:manager")];
     vi.restoreAllMocks();
   });
@@ -140,7 +157,7 @@ describe("status note reaches the parent through the real handlers", () => {
     expect(out).not.toContain("ask before");
   });
 
-  it("hides nested records from top-level tools, registry, transcripts, and lifecycle", async () => {
+  it("hides nested records from top-level tools, registry, sessions, and lifecycle", async () => {
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "nested result",
       session: { dispose: vi.fn() } as any,

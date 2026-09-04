@@ -125,13 +125,13 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({}); // invalid value dropped
   });
 
-  it("round-trips outputTranscript; drops non-boolean", () => {
-    saveSettings({ outputTranscript: false }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ outputTranscript: false });
-    saveSettings({ outputTranscript: true }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ outputTranscript: true });
-    writeProject({ outputTranscript: "no" } as any);
-    expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
+  it("round-trips persistSession and sessionDir; drops invalid values", () => {
+    saveSettings({ persistSession: false, sessionDir: ".pi/child-sessions" }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ persistSession: false, sessionDir: ".pi/child-sessions" });
+    saveSettings({ persistSession: true }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ persistSession: true });
+    writeProject({ persistSession: "no", sessionDir: "   " } as any);
+    expect(loadSettings(projectDir)).toEqual({});
   });
 
   it("sanitize drops non-boolean schedulingEnabled silently", async () => {
@@ -417,7 +417,8 @@ describe("settings persistence", () => {
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
         setWidgetMode: vi.fn(),
-        setOutputTranscript: vi.fn(),
+        setPersistSession: vi.fn(),
+        setSessionDir: vi.fn(),
         setMaxSubagentDepth: vi.fn(),
         setFallbackSubagent: vi.fn(),
       };
@@ -510,11 +511,10 @@ describe("settings persistence", () => {
       expect(appliers.setToolDescriptionMode).toHaveBeenCalledWith("full");
     });
 
-    it("applies outputTranscript (both true and false)", () => {
-      applySettings({ outputTranscript: false }, appliers);
-      expect(appliers.setOutputTranscript).toHaveBeenCalledWith(false);
-      applySettings({ outputTranscript: true }, appliers);
-      expect(appliers.setOutputTranscript).toHaveBeenCalledWith(true);
+    it("applies persistSession and sessionDir", () => {
+      applySettings({ persistSession: false, sessionDir: ".pi/child-sessions" }, appliers);
+      expect(appliers.setPersistSession).toHaveBeenCalledWith(false);
+      expect(appliers.setSessionDir).toHaveBeenCalledWith(".pi/child-sessions");
     });
 
     it("applies defaultMaxTurns: 0 as the explicit unlimited marker", () => {
@@ -575,7 +575,8 @@ describe("settings persistence", () => {
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
         setWidgetMode: vi.fn(),
-        setOutputTranscript: vi.fn(),
+        setPersistSession: vi.fn(),
+        setSessionDir: vi.fn(),
         setMaxSubagentDepth: vi.fn(),
         setFallbackSubagent: vi.fn(),
       };

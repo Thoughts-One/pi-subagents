@@ -6,7 +6,6 @@ import { getAvailableTypes, registerAgents, setFallbackSubagent } from "../src/a
 import { loadCustomAgents } from "../src/custom-agents.js";
 import { setScopeModelsEnabled } from "../src/model-scope.js";
 import { createNestedSubagentTools, type NestedAgentManager } from "../src/nested-tools.js";
-import { encodeCwd } from "../src/output-file.js";
 
 let cwd: string;
 let manager: NestedAgentManager;
@@ -91,6 +90,9 @@ afterEach(() => {
 describe("child-safe nested Agent tools", () => {
   it("allows any enabled agent when allowed_subagents is omitted", async () => {
     const [agent] = tools();
+    for (const removed of ["model", "thinking", "max_turns", "inherit_context", "isolated", "isolation"]) {
+      expect(agent.parameters.properties[removed]).toBeUndefined();
+    }
     const result = await execute(agent, {
       subagent_type: "reviewer",
       description: "review evidence",
@@ -106,7 +108,6 @@ describe("child-safe nested Agent tools", () => {
         maxSubagentDepth: 2,
         configCwd: cwd,
       }),
-      expect.any(Function), // onSpawned — attaches the child's transcript
     );
   });
 
@@ -196,51 +197,23 @@ describe("child-safe nested Agent tools", () => {
     expect(spawnAndWait).not.toHaveBeenCalled();
   });
 
-  it("uses a nested frontmatter pin over a caller-supplied model", async () => {
+  it("uses a nested frontmatter model pin and exposes no caller model field", async () => {
     writeAgent("pinned", "model: anthropic/allowed\n");
     registerAgents(loadCustomAgents(cwd));
     const [agent] = tools();
+    expect((agent.parameters as any).properties.model).toBeUndefined();
 
     const result = await execute(agent, {
       subagent_type: "pinned",
       description: "pinned child",
       prompt: "Do work",
-      model: "anthropic/blocked",
     });
 
     expect(result.isError).toBe(false);
     expect(spawnAndWait).toHaveBeenCalledWith(
       expect.anything(), expect.anything(), "pinned", "Do work",
       expect.objectContaining({ model: { provider: "anthropic", id: "allowed" } }),
-      expect.any(Function),
     );
-  });
-
-  it("applies the scopeModels allowlist to a caller-supplied model", async () => {
-    writeFileSync(
-      join(cwd, ".pi", "settings.json"),
-      JSON.stringify({ enabledModels: ["anthropic/allowed"] }),
-    );
-    setScopeModelsEnabled(true);
-    const [agent] = tools();
-
-    const blocked = await execute(agent, {
-      subagent_type: "scout",
-      description: "find files",
-      prompt: "Find them",
-      model: "anthropic/blocked",
-    });
-    expect(blocked.isError).toBe(true);
-    expect(blocked.content[0].text).toContain("Model not in scope");
-    expect(spawnAndWait).not.toHaveBeenCalled();
-
-    const inScope = await execute(agent, {
-      subagent_type: "scout",
-      description: "find files",
-      prompt: "Find them",
-      model: "anthropic/allowed",
-    });
-    expect(inScope.isError).toBe(false);
   });
 
   it("queues a steer for an owned child whose session is not ready yet", async () => {
@@ -324,20 +297,19 @@ describe("child-safe nested Agent tools", () => {
 
   it("waits for a queued owned child to start and settle", async () => {
     const [, getResult] = tools();
+    let settle!: () => void;
     const record = {
       id: "queued-child",
       status: "queued",
       parentAgentId: "parent-1",
-      promise: undefined as Promise<unknown> | undefined,
+      promise: new Promise<void>((resolve) => { settle = resolve; }),
       result: undefined as string | undefined,
     };
     records.set(record.id, record);
     setTimeout(() => {
-      record.status = "running";
-      record.promise = Promise.resolve().then(() => {
-        record.status = "completed";
-        record.result = "queued done";
-      });
+      record.status = "completed";
+      record.result = "queued done";
+      settle();
     }, 10);
 
     const result = await execute(getResult, { agent_id: record.id, wait: true });
@@ -406,7 +378,6 @@ describe("child-safe nested Agent tools", () => {
     expect(spawnAndWait).toHaveBeenCalledWith(
       expect.anything(), expect.anything(), "scout", "Do work",
       expect.objectContaining({ depth: 2, maxSubagentDepth: 3 }),
-      expect.any(Function),
     );
   });
 
@@ -461,33 +432,6 @@ describe("child-safe nested Agent tools", () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("provider exploded");
     expect(result.content[0].text).toContain("got this far");
-  });
-
-  it("files a nested transcript under the root session, honoring output_transcript", async () => {
-    records.set("parent-1", { id: "parent-1", status: "running", rootSessionId: "root-session" });
-    spawnAndWait.mockImplementation(async (_pi, _ctx, type, _prompt, options, onSpawned) => {
-      const record = { id: "child-1", type, status: "completed", result: "done", parentAgentId: options.parentAgentId };
-      records.set("child-1", record);
-      onSpawned?.("child-1");
-      return { id: "child-1", record };
-    });
-
-    // Real path construction (not mocked here), so clean up what it writes.
-    const transcriptRoot = join(tmpdir(), `pi-subagents-${process.getuid?.() ?? 0}`, encodeCwd(cwd));
-    try {
-      const [agent] = tools();
-      await execute(agent, { subagent_type: "scout", description: "traced", prompt: "Do work" });
-      expect(records.get("child-1").outputFile).toContain(join("root-session", "tasks", "child-1.output"));
-
-      // The child's own frontmatter still wins.
-      writeAgent("quiet", "output_transcript: false\n");
-      registerAgents(loadCustomAgents(cwd));
-      records.delete("child-1");
-      await execute(agent, { subagent_type: "quiet", description: "untraced", prompt: "Do work" });
-      expect(records.get("child-1").outputFile).toBeUndefined();
-    } finally {
-      rmSync(transcriptRoot, { recursive: true, force: true });
-    }
   });
 
   it("forwards the execution context to the manager unmodified", async () => {

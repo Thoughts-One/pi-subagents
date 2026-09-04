@@ -1,16 +1,17 @@
 /**
  * wait-queued.test.ts — get_subagent_result(wait: true) lifecycle behavior.
  *
- * Queued records have no promise yet (it's created when the queue starts
- * them), so the old `status === "running" && record.promise` condition
- * skipped the wait entirely and returned "still running" — forcing the
- * caller into a poll loop against the concurrency queue.
+ * Every record receives one stable completion promise before queue admission.
+ * A `wait: true` call therefore covers queue delay and execution without polling.
  *
- * Wiring test through the REAL extension: spawn background agents until one
+ * Wiring test through the real extension: spawn background agents until one
  * queues, call the real tool with wait:true, drain the queue, and assert the
  * call returns the final result.
  */
-import { describe, expect, it, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
@@ -49,6 +50,23 @@ function ctx() {
     getSystemPrompt: vi.fn(() => "parent"),
   } as any;
 }
+
+let agentDir: string;
+let priorAgentDir: string | undefined;
+
+beforeEach(() => {
+  agentDir = mkdtempSync(join(tmpdir(), "pi-wait-agent-dir-"));
+  priorAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  mkdirSync(join(agentDir, "agents"), { recursive: true });
+  writeFileSync(join(agentDir, "agents", "general-purpose.md"), "---\ntools: read\n---\nRead.");
+});
+
+afterEach(() => {
+  if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+  rmSync(agentDir, { recursive: true, force: true });
+});
 
 const textOf = (r: any): string => r.content[0].text;
 const flush = async () => {
@@ -113,7 +131,7 @@ describe("get_subagent_result wait:true on a queued agent", () => {
     for (let i = 0; i < 40 && !settled; i++) {
       while (resolvers.length > 0) resolvers.shift()!();
       await flush();
-      await new Promise((r) => setTimeout(r, 100)); // outlive one 250ms poll tick
+      await new Promise((r) => setTimeout(r, 10));
     }
 
     const result = await waitPromise;

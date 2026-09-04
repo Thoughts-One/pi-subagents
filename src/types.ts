@@ -43,8 +43,6 @@ export interface AgentConfig {
   maxTurns?: number;
   /** Persist this subagent as a normal pi session instead of keeping it in memory only. */
   persistSession?: boolean;
-  /** Write the subagent's .output transcript. Defaults to true; false suppresses only that transcript. */
-  outputTranscript?: boolean;
   /** Optional session directory used when persistSession is true. Omitted = pi's normal session location. */
   sessionDir?: string;
   /**
@@ -151,10 +149,10 @@ export interface AgentRecord {
   worktreeResult?: { hasChanges: boolean; branch?: string };
   /** The tool_use_id from the original Agent tool call. */
   toolCallId?: string;
-  /** Path to the streaming output transcript file. */
-  outputFile?: string;
-  /** Cleanup function for the output file stream subscription. */
-  outputCleanup?: () => void;
+  /** Persisted Pi session file for this child, when session persistence is enabled. */
+  sessionFile?: string;
+  /** True when this role can modify files through the write or edit tool. */
+  isWriteClass?: boolean;
   /** Content-free, model-bucketed cumulative usage for this agent and its nested descendants. */
   lifetimeUsage: LifetimeUsage;
   /** Model resolved before this agent started, retained even if the session fails before a response. */
@@ -180,12 +178,6 @@ export interface AgentRecord {
   parentAgentId?: string;
   /** Effective inherited nesting cap for this branch. */
   maxSubagentDepth?: number;
-  /**
-   * Session id of the root (main) session this branch descends from. Nested
-   * spawns inherit it so their transcripts file under the same session
-   * directory as their ancestors' instead of the child session's own id.
-   */
-  rootSessionId?: string;
   /** Typed admission retained for documentation-auditor resume checks. */
   documentationAuditAdmission?: DocumentationAuditAdmission;
   /** Result contract resolved from frontmatter at spawn time. */
@@ -218,7 +210,7 @@ export interface NotificationDetails {
   maxTurns?: number;
   totalTokens: number;
   durationMs: number;
-  outputFile?: string;
+  sessionFile?: string;
   error?: string;
   resultPreview: string;
   /** Additional agents in a group notification. */
@@ -248,14 +240,9 @@ export interface ScheduledSubagent {
   /** Computed at create time for interval/once. */
   intervalMs?: number;
 
-  // spawn params (subset of Agent tool params; no inherit_context, no resume)
+  // spawn params (subset of Agent tool params; no resume)
   subagent_type: SubagentType;
   prompt: string;
-  model?: string;
-  thinking?: ThinkingLevel;
-  max_turns?: number;
-  isolated?: boolean;
-  isolation?: IsolationMode;
 
   // state
   enabled: boolean;

@@ -341,6 +341,10 @@ export interface RunOptions {
   isolated?: boolean;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
+  /** Manager-wide child-session persistence default. Role frontmatter overrides it. */
+  persistSessionDefault?: boolean;
+  /** Manager-wide persisted child-session root. Role frontmatter overrides it. */
+  sessionDirDefault?: string;
   /** Override working directory (e.g. for worktree isolation). */
   cwd?: string;
   /**
@@ -840,9 +844,12 @@ export async function runAgent(
   }
 
   const settingsManager = SettingsManager.create(configCwd, agentDir);
-  const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
+  const configuredSessionDir = resolveConfiguredSessionDir(
+    agentConfig?.sessionDir ?? options.sessionDirDefault,
+    effectiveCwd,
+  );
   const defaultSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR ?? settingsManager.getSessionDir?.();
-  const sessionManager = agentConfig?.persistSession
+  const sessionManager = (agentConfig?.persistSession ?? options.persistSessionDefault ?? true)
     ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir)
     : SessionManager.inMemory(effectiveCwd);
 

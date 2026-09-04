@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`audit_documents` — typed admission for finite documentation audits.** The new tool validates the complete manifest, authority roots, labels, precedence, disposition rules, and parent-produced reference evidence before it creates a child record, queue entry, session, transcript, or schedule. It canonicalizes readable paths, rejects aliases and root escapes, renders one deterministic brief, and is the only route that can start `documentation-auditor`; only a still-live typed-origin record can resume. The generic `Agent` fresh route, RPC, nested tools, schedules, and direct manager calls fail closed.
 - **`result_contract: plan-authority` — machine-enforced outer Plan provenance.** A declared Plan contract now validates the first result line before completion events, notifications, and persisted records. It accepts only the fixed Claude Fable receipt or disclosed Sol fallback receipt. Missing, malformed, or substituted provenance makes the record a package error while retaining raw output for diagnosis.
 
+### Changed
+- **Governed child lifecycle.** Child Pi sessions now persist by default, with manager-wide `persistSession` and `sessionDir` settings and role-frontmatter overrides. Results and notifications name the child session file. Every top-level child now shares `maxConcurrent`, including foreground calls, and only one write-class child can be active in one parent session.
+- **Role-owned execution policy.** The `Agent` and nested `Agent` schemas no longer accept caller overrides for model, thinking, turn limits, context inheritance, hermetic mode, or worktree isolation. Role frontmatter remains the authority for those fields.
+
+### Removed
+- **Temporary `.output` transcripts and verbose result retrieval.** Removed the transcript writer, `outputTranscript`, `output_transcript`, and `get_subagent_result.verbose`. Persisted Pi sessions replace the transient transcript artifact.
+
 ### Fixed
 - **Typed documentation admission now rejects surplus fields and every schedule/resume bypass before side effects.** Outer and nested audit objects are closed, stored jobs cannot arm the documentation auditor, updates cannot change a job into that role, and any terminal `INPUT_REQUIRED` result requires a fresh typed call.
 - **Plan result-contract failures retain simultaneous runner failures.** Fresh and resumed settlement now use one diagnostic formatter, so provenance enforcement no longer hides the provider failure that produced an invalid outer result.

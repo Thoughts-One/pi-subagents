@@ -16,14 +16,13 @@
  * a passing test. Each run therefore pins `live: false` rather than trusting the
  * env var to leave it alone — the pre-publish smoke sets it globally.
  */
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Context, fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
-import { encodeCwd } from "../src/output-file.js";
 import {
   agentCall,
   type FauxReply,
@@ -54,17 +53,6 @@ function toolResultTexts(context: Context): Array<{ name: string; text: string }
     out.push({ name, text });
   }
   return out;
-}
-
-/** Every `.output` transcript beneath a root, at any session/tasks depth. */
-function findOutputFiles(root: string): string[] {
-  let entries: string[];
-  try { entries = readdirSync(root); } catch { return []; }
-  return entries.flatMap((e) => {
-    const full = join(root, e);
-    if (statSync(full).isDirectory()) return findOutputFiles(full);
-    return full.endsWith(".output") ? [full] : [];
-  });
 }
 
 function writeAgents(cwd: string): void {
@@ -176,12 +164,10 @@ describe("nested delegation e2e (real pi-mono, faux model)", () => {
     expect(run.responseText).toContain(WORKER_MARKER);
   });
 
-  it("backgrounds a nested child, polls it by id, and streams its transcript", async () => {
+  it("backgrounds a nested child and polls it by id", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "nested-e2e-bg-"));
     tmpDirs.push(cwd);
     writeAgents(cwd);
-    const transcriptRoot = join(tmpdir(), `pi-subagents-${process.getuid?.() ?? 0}`, encodeCwd(cwd));
-    rmSync(transcriptRoot, { recursive: true, force: true });
 
     const respond = (context: Context): FauxReply => {
       const text = firstUserText(context);
@@ -217,8 +203,7 @@ describe("nested delegation e2e (real pi-mono, faux model)", () => {
       });
     };
 
-    try {
-      run = await runPrintMode({
+    run = await runPrintMode({
         prompt: "Delegate the work.",
         cwd,
         respond,
@@ -235,26 +220,5 @@ describe("nested delegation e2e (real pi-mono, faux model)", () => {
       expect(orchestratorResult).toContain("orchestrator polled");
       expect(orchestratorResult).toContain(WORKER_MARKER);
 
-      // Only the REAL manager wires onSessionCreated → streamToOutputFile for a
-      // nested spawn, and only real rootSessionId propagation puts the file under
-      // this root. Identify the WORKER's own transcript by the prompt in its
-      // initial entry — matching the marker alone would also match the
-      // orchestrator's transcript, which merely echoes it, and would pass even
-      // with nested transcripts switched off entirely.
-      // Match on the FIRST line — writeInitialEntry seeds each transcript with the
-      // prompt that agent was given. Searching the whole file would also match the
-      // orchestrator's, which records the same string inside its Agent tool-call
-      // arguments, and would pass with nested transcripts switched off entirely.
-      const transcripts = findOutputFiles(transcriptRoot).map((f) => readFileSync(f, "utf-8"));
-      const workerTranscript = transcripts.find((t) => {
-        const first = JSON.parse(t.split("\n")[0]) as { message?: { content?: unknown } };
-        return first.message?.content === "Do the leaf work.";
-      });
-      expect(workerTranscript).toBeDefined();
-      // ...and it streamed the child's own turn, not just the seeded prompt.
-      expect(workerTranscript).toContain(WORKER_MARKER);
-    } finally {
-      rmSync(transcriptRoot, { recursive: true, force: true });
-    }
   });
 });

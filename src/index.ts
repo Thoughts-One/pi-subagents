@@ -18,7 +18,7 @@ import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Tex
 import { Type } from "@sinclair/typebox";
 import { abortable } from "./abortable.js";
 import { AgentManager } from "./agent-manager.js";
-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
+import { getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
@@ -29,7 +29,6 @@ import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-conf
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
-import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
@@ -172,7 +171,7 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
     `<task-notification>`,
     `<task-id>${record.id}</task-id>`,
     record.toolCallId ? `<tool-use-id>${escapeXml(record.toolCallId)}</tool-use-id>` : null,
-    record.outputFile ? `<output-file>${escapeXml(record.outputFile)}</output-file>` : null,
+    record.sessionFile ? `<session-file>${escapeXml(record.sessionFile)}</session-file>` : null,
     `<status>${escapeXml(status)}</status>`,
     `<summary>Agent "${escapeXml(record.description)}" ${record.status}${getStatusNote(record.status)}</summary>`,
     `<result>${escapeXml(resultPreview)}</result>`,
@@ -215,7 +214,7 @@ function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, act
     maxTurns: activity?.maxTurns,
     totalTokens,
     durationMs: record.completedAt ? record.completedAt - record.startedAt : 0,
-    outputFile: record.outputFile,
+    sessionFile: record.sessionFile,
     error: record.error,
     resultPreview: record.result
       ? record.result.length > resultMaxLen
@@ -267,9 +266,9 @@ export default function (pi: ExtensionAPI) {
           line += "\n  " + theme.fg("dim", `⎿  ${preview}`);
         }
 
-        // Line 4: output file link (if present)
-        if (d.outputFile) {
-          line += "\n  " + theme.fg("muted", `transcript: ${d.outputFile}`);
+        // Line 4: persisted session file (if present)
+        if (d.sessionFile) {
+          line += "\n  " + theme.fg("muted", `session: ${d.sessionFile}`);
         }
 
         return line;
@@ -297,9 +296,6 @@ export default function (pi: ExtensionAPI) {
   // before they reach pi.sendMessage (fire-and-forget).
   const pendingNudges = new Map<string, ReturnType<typeof setTimeout>>();
   const NUDGE_HOLD_MS = 200;
-  // A queued result wait must observe completion before its held notification
-  // can fire, so successful waits can still suppress that redundant nudge.
-  const QUEUE_WAIT_POLL_MS = Math.floor(NUDGE_HOLD_MS / 4);
 
   function scheduleNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
     cancelNudge(key);
@@ -322,7 +318,7 @@ export default function (pi: ExtensionAPI) {
     if (record.resultConsumed) return;  // re-check at send time
 
     const notification = formatTaskNotification(record, 500);
-    const footer = record.outputFile ? `\nFull transcript available at: ${record.outputFile}` : '';
+    const footer = record.sessionFile ? `\nChild session available at: ${record.sessionFile}` : '';
 
     pi.sendMessage<NotificationDetails>({
       customType: "subagent-notification",
@@ -489,9 +485,7 @@ export default function (pi: ExtensionAPI) {
     // Only audit_documents issues this unforgeable admission. A registry caller
     // must not be able to replay one it observed on a completed record.
     delete safeOptions.documentationAuditAdmission;
-    // Also internal: it names a transcript directory, so a forged value would
-    // be a path-traversal primitive.
-    delete safeOptions.rootSessionId;
+    delete safeOptions.writeClass;
     // Cross-extension callers get the same dispatch contract as the LLM (#183).
     // The RPC layer already throws for an unresolvable model rather than falling
     // back silently; a bad agent type should not be quieter. Throws become error
@@ -621,11 +615,6 @@ export default function (pi: ExtensionAPI) {
   let fleetViewEnabled = true;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
-
-  // Project/global default for writing the subagent .output transcript lives in
-  // output-file.ts (both spawn paths read it). A custom agent's
-  // `output_transcript` frontmatter overrides it per spawn; when the frontmatter
-  // is silent, this default applies. Read live at spawn time.
 
   // ---- Join mode configuration ----
   let defaultJoinMode: JoinMode = 'smart';
@@ -770,7 +759,8 @@ export default function (pi: ExtensionAPI) {
       setToolDescriptionMode: setToolDescriptionMode,
       setFleetView: setFleetViewEnabled,
       setWidgetMode: setWidgetMode,
-      setOutputTranscript: setOutputTranscriptDefault,
+      setPersistSession: (value) => manager.setPersistSessionDefault(value),
+      setSessionDir: (value) => manager.setSessionDirDefault(value),
       setMaxSubagentDepth: setMaxSubagentDepth,
       setFallbackSubagent: setFallbackSubagent,
     },
@@ -803,7 +793,7 @@ export default function (pi: ExtensionAPI) {
       model,
       cwd: ctx.cwd,
       modelRegistry: ctx.modelRegistry,
-      callerSupplied: invocation.modelFromParams,
+      callerSupplied: false,
       agentLabel: config?.displayName ?? type,
       modelInput: invocation.modelInput,
     });
@@ -827,27 +817,13 @@ export default function (pi: ExtensionAPI) {
     type: SubagentType,
     prompt: string,
     description: string,
-    config: AgentConfig | undefined,
     prepared: Exclude<ReturnType<typeof prepareFreshSpawn>, { error: string }>,
     callbacks: Partial<ReturnType<typeof createActivityTracker>["callbacks"]> = {},
     signal?: AbortSignal,
     invocationOverride?: AgentInvocation,
     documentationAuditAdmission?: DocumentationAuditAdmission,
   ): Promise<{ id: string; record: AgentRecord; isBackground: boolean }> {
-    let id: string | undefined;
-    const outputTranscript = config?.outputTranscript ?? getOutputTranscriptDefault();
-    const attachTranscript = (agentId: string): void => {
-      if (!outputTranscript) return;
-      const record = manager.getRecord(agentId);
-      if (!record) return;
-      record.outputFile = createOutputFilePath(ctx.cwd, agentId, ctx.sessionManager.getSessionId());
-      writeInitialEntry(record.outputFile, agentId, prompt, ctx.cwd);
-    };
     const onSessionCreated = (session: Parameters<NonNullable<typeof callbacks.onSessionCreated>>[0]): void => {
-      if (id) {
-        const record = manager.getRecord(id);
-        if (record?.outputFile) record.outputCleanup = streamToOutputFile(session, record.outputFile, id, ctx.cwd);
-      }
       callbacks.onSessionCreated?.(session);
     };
     const options = {
@@ -868,21 +844,16 @@ export default function (pi: ExtensionAPI) {
         runInBackground: prepared.invocation.runInBackground,
         isolation: prepared.invocation.isolation,
       },
-      rootSessionId: ctx.sessionManager.getSessionId(),
       documentationAuditAdmission,
       ...callbacks,
       onSessionCreated,
     };
     if (prepared.invocation.runInBackground) {
-      id = manager.spawn(pi, ctx, type, prompt, { ...options, isBackground: true });
-      attachTranscript(id);
+      const id = manager.spawn(pi, ctx, type, prompt, { ...options, isBackground: true });
       const record = manager.getRecord(id)!;
       return { id, record, isBackground: true };
     }
-    const result = await manager.spawnAndWait(pi, ctx, type, prompt, { ...options, signal }, (agentId) => {
-      id = agentId;
-      attachTranscript(agentId);
-    });
+    const result = await manager.spawnAndWait(pi, ctx, type, prompt, { ...options, signal });
     return { ...result, isBackground: false };
   }
 
@@ -944,7 +915,6 @@ export default function (pi: ExtensionAPI) {
           type,
           prepared.prompt,
           prepared.request.description,
-          config,
           fresh,
           backgroundActivity?.callbacks,
           signal,
@@ -1007,10 +977,9 @@ Custom agents: .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.
 
 Notes:
 - description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.
-- Parallel work: one message, multiple Agent calls, run_in_background: true on each. You are notified when background agents finish — never poll or sleep.
+- Parallel read-only work: one message, multiple foreground Agent calls. Use background only when you will work before you need the result. Write-class agents run alone.
 - The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
-- resume continues a previous agent by ID; steer_subagent messages a running one.
-- isolation: "worktree" runs the agent in an isolated git worktree; changes land on a branch.`;
+- resume continues a previous agent by ID; steer_subagent messages a running one.`;
 
   const fullAgentToolDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
 
@@ -1028,7 +997,7 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 ## Usage notes
 
 - Always include a short (3-5 word) description summarizing what the agent will do (shown in UI).
-- When you launch multiple agents for independent work, send them in a single message with multiple tool uses, with run_in_background: true on each, so they run concurrently. If the user specifies that they want agents run "in parallel", you MUST send a single message with multiple tool calls. Foreground calls run sequentially — only one executes at a time.
+- When you launch multiple independent read-only agents, send them in one message with multiple foreground Agent calls. Use background only when you will work before you need the result. Write-class agents run alone.
 - When the agent is done, it returns a single message back to you. The result is not visible to the user — to show the user, send a text message with a concise summary.
 - Trust but verify: an agent's summary describes what it intended to do, not necessarily what it did. When an agent writes or edits code, check the actual changes before reporting work as done.
 - Use run_in_background for work you don't need immediately. You will be notified when it completes — do NOT poll or sleep waiting for it. Continue with other work or respond to the user instead.
@@ -1037,10 +1006,7 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - Use steer_subagent to send mid-run messages to a running background agent.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
 - If an agent's description says it should be used proactively, try to use it without the user having to ask for it first.
-- Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
-- Use thinking to control extended thinking level.
-- Use inherit_context if the agent needs the parent conversation history.
-- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications). The worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.${scheduleGuideline}
+${scheduleGuideline}
 
 ## Writing the prompt
 
@@ -1123,23 +1089,6 @@ Terse command-style prompts produce shallow, generic work.
       subagent_type: Type.String({
         description: `The type of specialized agent to use. Available types: ${getAvailableTypes().join(", ")}. Custom agents from .pi/agents/*.md (project) or ${getAgentDir()}/agents/*.md (global) are also available.`,
       }),
-      model: Type.Optional(
-        Type.String({
-          description:
-            'Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Omit to use the agent type\'s default.',
-        }),
-      ),
-      thinking: Type.Optional(
-        Type.String({
-          description: `Thinking level: ${THINKING_LEVELS.join(", ")}. Overrides agent default.`,
-        }),
-      ),
-      max_turns: Type.Optional(
-        Type.Number({
-          description: "Maximum number of agentic turns before stopping. Omit for unlimited (default).",
-          minimum: 1,
-        }),
-      ),
       run_in_background: Type.Optional(
         Type.Boolean({
           description: "Set to true to run in background. Returns agent ID immediately. You will be notified on completion.",
@@ -1149,21 +1098,6 @@ Terse command-style prompts produce shallow, generic work.
         Type.String({
           description: "Optional agent ID to resume from. Continues from previous context.",
           minLength: 1,
-        }),
-      ),
-      isolated: Type.Optional(
-        Type.Boolean({
-          description: "If true, agent gets no extension/MCP tools — only built-in tools.",
-        }),
-      ),
-      inherit_context: Type.Optional(
-        Type.Boolean({
-          description: "If true, fork parent conversation into the agent. Default: false (fresh context).",
-        }),
-      ),
-      isolation: Type.Optional(
-        Type.Literal("worktree", {
-          description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
         }),
       ),
       cwd: Type.Optional(
@@ -1234,7 +1168,7 @@ Terse command-style prompts produce shallow, generic work.
               line += "\n" + theme.fg("dim", `  ${l}`);
             }
             if (resultText.split("\n").length > 50) {
-              line += "\n" + theme.fg("muted", "  ... (use get_subagent_result with verbose for full output)");
+              line += "\n" + theme.fg("muted", "  ... (use get_subagent_result for full output)");
             }
           }
         } else {
@@ -1359,9 +1293,6 @@ Terse command-style prompts produce shallow, generic work.
         if (params.resume) {
           return textResult("Cannot combine `schedule` with `resume` — schedules create fresh agents.");
         }
-        if (params.inherit_context) {
-          return textResult("Cannot combine `schedule` with `inherit_context` — there is no parent conversation at fire time.");
-        }
         if (params.run_in_background === false) {
           return textResult("Cannot combine `schedule` with `run_in_background: false` — scheduled jobs always run in background.");
         }
@@ -1377,11 +1308,6 @@ Terse command-style prompts produce shallow, generic work.
             // at fire time, and the original is what a user edits.
             subagent_type: requestedType,
             prompt: params.prompt as string,
-            model: resolvedConfig.modelInput,
-            thinking: thinking,
-            max_turns: effectiveMaxTurns,
-            isolated: isolated,
-            isolation: isolation,
           });
           const next = scheduler.getNextRun(job.id);
           return textResult(
@@ -1435,7 +1361,6 @@ Terse command-style prompts produce shallow, generic work.
             subagentType,
             params.prompt,
             params.description,
-            customConfig,
             fresh,
             bgCallbacks,
             undefined,
@@ -1455,7 +1380,7 @@ Terse command-style prompts produce shallow, generic work.
           `Agent ID: ${id}\n` +
           `Type: ${displayName}\n` +
           `Description: ${params.description}\n` +
-          (record?.outputFile ? `Output file: ${record.outputFile}\n` : "") +
+          (record?.sessionFile ? `Session file: ${record.sessionFile}\n` : "") +
           (isQueued ? `Position: queued (max ${manager.getMaxConcurrent()} concurrent)\n` : "") +
           `\nYou will be notified when this agent completes.\n` +
           `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.\n` +
@@ -1521,7 +1446,6 @@ Terse command-style prompts produce shallow, generic work.
           subagentType,
           params.prompt,
           params.description,
-          customConfig,
           fresh,
           fgCallbacks,
           signal,
@@ -1557,7 +1481,8 @@ Terse command-style prompts produce shallow, generic work.
       if (tokenText) statsParts.push(tokenText);
       return textResult(
         `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getForegroundOutcomeNote(record.status)}.\n\n` +
-        (record.result?.trim() || "No output."),
+        (record.result?.trim() || "No output.") +
+        (record.sessionFile ? `\n\nSession file: ${record.sessionFile}` : ""),
         details,
       );
     },
@@ -1580,11 +1505,6 @@ Terse command-style prompts produce shallow, generic work.
           description: "If true, wait for the agent to complete before returning. Default: false.",
         }),
       ),
-      verbose: Type.Optional(
-        Type.Boolean({
-          description: "If true, include the agent's full conversation (messages + tool calls). Default: false.",
-        }),
-      ),
     }),
     execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
       const record = manager.getRecord(params.agent_id);
@@ -1594,17 +1514,10 @@ Terse command-style prompts produce shallow, generic work.
 
       // Wait for completion if requested. Cancellation stops only this tool
       // call; the background agent keeps running and remains unconsumed so its
-      // completion notification can still be delivered.
-      // Queued agents have no promise yet (it's created when the queue starts
-      // them), so poll until they leave the queue, then await like a running one.
-      if (params.wait && (record.status === "running" || record.status === "queued")) {
-        while (record.status === "queued") {
-          await abortable(
-            new Promise<void>((resolve) => setTimeout(resolve, QUEUE_WAIT_POLL_MS)),
-            signal,
-          );
-        }
-        if (record.promise) await abortable(record.promise, signal);
+      // completion notification can still be delivered. The record promise is
+      // created before queue admission, so one await covers queued and running.
+      if (params.wait && (record.status === "running" || record.status === "queued") && record.promise) {
+        await abortable(record.promise, signal);
       }
 
       const displayName = getDisplayName(record.type);
@@ -1620,7 +1533,9 @@ Terse command-style prompts produce shallow, generic work.
       let output =
         `Agent: ${record.id}\n` +
         `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
-        `Description: ${record.description}\n\n`;
+        `Description: ${record.description}\n` +
+        (record.sessionFile ? `Session file: ${record.sessionFile}\n` : "") +
+        "\n";
 
       if (record.status === "running") {
         output += "Agent is still running. Use wait: true or check back later.";
@@ -1634,14 +1549,6 @@ Terse command-style prompts produce shallow, generic work.
       if (record.status !== "running" && record.status !== "queued") {
         record.resultConsumed = true;
         cancelNudge(params.agent_id);
-      }
-
-      // Verbose: include full conversation
-      if (params.verbose && record.session) {
-        const conversation = getAgentConversation(record.session);
-        if (conversation) {
-          output += `\n\n--- Agent Conversation ---\n${conversation}`;
-        }
       }
 
       return textResult(output);
@@ -2016,7 +1923,6 @@ Terse command-style prompts produce shallow, generic work.
     if (cfg.disallowedTools?.length) fmFields.push(`disallowed_tools: ${cfg.disallowedTools.join(", ")}`);
     if (cfg.inheritContext) fmFields.push("inherit_context: true");
     if (cfg.runInBackground) fmFields.push("run_in_background: true");
-    if (cfg.outputTranscript === false) fmFields.push("output_transcript: false");
     if (cfg.isolated) fmFields.push("isolated: true");
     if (cfg.memory) fmFields.push(`memory: ${cfg.memory}`);
     if (cfg.isolation) fmFields.push(`isolation: ${cfg.isolation}`);
@@ -2143,7 +2049,8 @@ skills: <true (inherit all), false (none), or comma-separated skill names to pre
 disallowed_tools: <comma-separated tool names to block, even if otherwise available. Omit for none>
 inherit_context: <true to fork parent conversation into agent so it sees chat history. Default: false>
 run_in_background: <true to run in background by default. Default: false>
-output_transcript: <false to write no transcript file or path for this agent. Independent of persist_session. Default: true>
+persist_session: <true to persist this child Pi session. Default: true>
+session_dir: <optional session directory for persisted child Pi sessions>
 isolated: <true for no extension/MCP tools, only built-in tools. Default: false>
 memory: <"user" (global), "project" (per-project), or "local" (gitignored per-project) for persistent memory. Omit for none>
 isolation: <"worktree" to run in isolated git worktree. Omit for normal>
@@ -2157,9 +2064,7 @@ Guidelines for choosing settings:
 - For code modification tasks: include edit, write
 - Use prompt_mode: append if the agent should keep the default system prompt and add specialization on top
 - Use prompt_mode: replace for fully custom agents with their own personality/instructions
-- Set inherit_context: true if the agent needs to know what was discussed in the parent conversation
-- Set isolated: true if the agent should NOT have access to MCP servers or other extensions
-- Set output_transcript: false to skip writing this agent's transcript; this alone doesn't keep the run off disk (persist_session, isolation: worktree commits, and memory still write) — set those too if that's the goal
+- Set persist_session: false when the child session must stay in memory
 - Only include frontmatter fields that differ from defaults — omit fields where the default is fine
 
 Write the file using the write tool. Only write the file, nothing else.`;
@@ -2278,7 +2183,8 @@ ${systemPrompt}
       toolDescriptionMode: getToolDescriptionMode(),
       fleetView: isFleetViewEnabled(),
       widgetMode: getWidgetMode(),
-      outputTranscript: getOutputTranscriptDefault(),
+      persistSession: manager.getPersistSessionDefault(),
+      sessionDir: manager.getSessionDirDefault(),
       maxSubagentDepth: getMaxSubagentDepth(),
       // Deliberately NOT `?? "general-purpose"`: every settings change writes the
       // whole snapshot, and materializing the implicit default would turn it into
@@ -2308,7 +2214,7 @@ ${systemPrompt}
         {
           id: "maxConcurrent",
           label: "Max concurrency",
-          description: "Max concurrent background agents (Enter to type)",
+          description: "Max concurrent top-level agents (Enter to type)",
           currentValue: String(mc),
           values: [String(mc)],
         },
@@ -2369,10 +2275,10 @@ ${systemPrompt}
           values: fallbackValues,
         },
         {
-          id: "outputTranscript",
-          label: "Output transcript",
-          description: "Write each subagent's .output transcript by default. A custom agent's output_transcript frontmatter overrides this.",
-          currentValue: getOutputTranscriptDefault() ? "on" : "off",
+          id: "persistSession",
+          label: "Persist sessions",
+          description: "Persist child Pi sessions by default. Role frontmatter overrides this.",
+          currentValue: manager.getPersistSessionDefault() ? "on" : "off",
           values: ["on", "off"],
         },
         {
@@ -2463,10 +2369,10 @@ ${systemPrompt}
             ? "Unknown or disabled agent types will now be rejected"
             : `Unknown agent types will fall back to ${value}`,
         );
-      } else if (id === "outputTranscript") {
+      } else if (id === "persistSession") {
         const enabled = value === "on";
-        setOutputTranscriptDefault(enabled);
-        notifyApplied(ctx, `Output transcript ${enabled ? "enabled" : "disabled"} by default`);
+        manager.setPersistSessionDefault(enabled);
+        notifyApplied(ctx, `Child session persistence ${enabled ? "enabled" : "disabled"} by default`);
       } else if (id === "toolDescriptionMode") {
         setToolDescriptionMode(value as ToolDescriptionMode);
         notifyApplied(ctx, `Tool description set to ${value}. Takes effect on next pi session.`);

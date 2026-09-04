@@ -9,6 +9,7 @@ import {
 import { Type } from "@sinclair/typebox";
 import { abortable } from "./abortable.js";
 import {
+  agentConfigCanWrite,
   buildAgentRegistry,
   getAgentConfigIn,
   getAvailableTypesIn,
@@ -20,12 +21,6 @@ import { isDocumentationAuditorType } from "./documentation-audit.js";
 import { resolveAgentInvocationConfig } from "./invocation-config.js";
 import { resolveModel } from "./model-resolver.js";
 import { checkModelScope } from "./model-scope.js";
-import {
-  createOutputFilePath,
-  getOutputTranscriptDefault,
-  streamToOutputFile,
-  writeInitialEntry,
-} from "./output-file.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import type {
   AgentConfig,
@@ -66,7 +61,7 @@ interface NestedSpawnOptions {
   parentAgentId: string;
   maxSubagentDepth: number;
   configCwd?: string;
-  rootSessionId?: string;
+  writeClass?: boolean;
 }
 
 export interface NestedAgentManager {
@@ -83,8 +78,6 @@ export interface NestedAgentManager {
     type: string,
     prompt: string,
     options: Omit<NestedSpawnOptions, "isBackground">,
-    /** Fires synchronously after spawn, before the session exists — where the transcript is attached. */
-    onSpawned?: (id: string) => void,
   ): Promise<{ id: string; record: AgentRecord }>;
   getRecord(id: string): AgentRecord | undefined;
   resume(id: string, prompt: string, signal?: AbortSignal): Promise<AgentRecord | undefined>;
@@ -137,7 +130,8 @@ function formatRecord(record: AgentRecord, position: ResultPosition): string {
   const note = position === "inline"
     ? getForegroundOutcomeNote(record.status)
     : getStatusNote(record.status);
-  return note ? `Nested agent${note}.\n\n${text}` : text;
+  const sessionFile = record.sessionFile ? `\n\nSession file: ${record.sessionFile}` : "";
+  return (note ? `Nested agent${note}.\n\n${text}` : text) + sessionFile;
 }
 
 /** Build child-safe orchestration tools scoped to one parent agent instance. */
@@ -165,14 +159,8 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       prompt: Type.String({ description: "Self-contained task for the nested agent." }),
       description: Type.String({ description: "Short 3-5 word task description." }),
       subagent_type: Type.String({ description: `Allowed nested agent type. Available: ${availableIn(loadRegistry()).join(", ") || "none"}.` }),
-      model: Type.Optional(Type.String({ description: "Optional provider/model override." })),
-      thinking: Type.Optional(Type.String({ description: "Optional thinking level." })),
-      max_turns: Type.Optional(Type.Number({ minimum: 1 })),
       run_in_background: Type.Optional(Type.Boolean()),
       resume: Type.Optional(Type.String({ description: "Resume a nested agent owned by this parent." })),
-      isolated: Type.Optional(Type.Boolean()),
-      inherit_context: Type.Optional(Type.Boolean()),
-      isolation: Type.Optional(Type.Literal("worktree")),
     }),
     execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
       if (params.resume) {
@@ -238,15 +226,12 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         model,
         cwd: context.configCwd,
         modelRegistry: ctx.modelRegistry,
-        callerSupplied: invocation.modelFromParams,
+        callerSupplied: false,
         agentLabel: config?.displayName ?? resolvedType,
         modelInput: invocation.modelInput,
       });
       if (scopeVerdict.kind === "error") return textResult(scopeVerdict.message, true);
 
-      // The whole branch shares the root session's transcript directory; read it
-      // off the owning parent rather than this child session's own id.
-      const rootSessionId = context.manager.getRecord(context.parentAgentId)?.rootSessionId;
       const childDepth = context.depth + 1;
       const options: NestedSpawnOptions = {
         description: params.description,
@@ -269,35 +254,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         parentAgentId: context.parentAgentId,
         maxSubagentDepth: context.maxSubagentDepth,
         configCwd: context.configCwd,
-        rootSessionId,
-      };
-
-      // Transcript wiring, same gate as the top-level path: the child's
-      // `output_transcript` frontmatter wins, else the project default. Without
-      // it a nested run leaves no artifact but the string it returned — the
-      // parent's own transcript records the call and the answer, never the tool
-      // calls in between, which is exactly what a misbehaving child needs to
-      // explain itself. Filed under the ROOT session and this branch's config
-      // root, so a nested transcript lands in the same `tasks/` directory as its
-      // ancestors' rather than in a directory of its own.
-      const transcriptSessionId =
-        rootSessionId !== undefined && (config?.outputTranscript ?? getOutputTranscriptDefault())
-          ? rootSessionId
-          : undefined;
-      let childId: string | undefined;
-      const attachTranscript = (id: string): void => {
-        childId = id;
-        if (transcriptSessionId === undefined) return;
-        const rec = context.manager.getRecord(id);
-        if (!rec) return;
-        rec.outputFile = createOutputFilePath(context.configCwd, id, transcriptSessionId);
-        writeInitialEntry(rec.outputFile, id, params.prompt, ctx.cwd);
-      };
-      options.onSessionCreated = (session) => {
-        const rec = childId === undefined ? undefined : context.manager.getRecord(childId);
-        if (rec?.outputFile && childId !== undefined) {
-          rec.outputCleanup = streamToOutputFile(session, rec.outputFile, childId, ctx.cwd);
-        }
+        writeClass: agentConfigCanWrite(config),
       };
 
       // `ctx` is forwarded to the manager unmodified, never captured at tool-build
@@ -315,9 +272,6 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
             ...options,
             isBackground: true,
           });
-          // Synchronous, before the event loop yields — onSessionCreated fires
-          // asynchronously inside runAgent, so the file is attached in time.
-          attachTranscript(id);
           return textResult(`Nested agent started in background. Agent ID: ${id}`);
         }
 
@@ -327,7 +281,6 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
           resolvedType,
           params.prompt,
           { ...options, signal },
-          attachTranscript,
         );
         return textResult(formatRecord(record, "inline"), record.status === "error");
       } catch (err) {
@@ -349,15 +302,10 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       if (!ownsRecord(record, context.parentAgentId)) {
         return textResult(`Nested agent not found or not owned by this parent: "${params.agent_id}".`, true);
       }
-      // Wait for completion if requested. Cancellation (e.g. the parent's tool
-      // call is aborted) stops only this wait; the nested child keeps running and
-      // stays unconsumed. Queued records have no promise until the manager starts
-      // them, so poll — abortably — until they leave the queue, then await.
-      if (params.wait && (record.status === "queued" || record.status === "running")) {
-        while (record.status === "queued") {
-          await abortable(new Promise<void>(resolve => setTimeout(resolve, 250)), signal);
-        }
-        if (record.promise) await abortable(record.promise, signal);
+      // Cancellation stops only this wait. The child keeps running. The record
+      // promise exists before queue admission, so one await covers both states.
+      if (params.wait && (record.status === "queued" || record.status === "running") && record.promise) {
+        await abortable(record.promise, signal);
       }
       return textResult(formatRecord(record, "fetched"), record.status === "error");
     },

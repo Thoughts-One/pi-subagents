@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -81,9 +81,11 @@ describe("Agent cwd wiring", () => {
   });
 
   it("exposes cwd and forwards it to a fresh run while retaining parent config", async () => {
+    const sessionFile = join(agentDir, "child.jsonl");
+    writeFileSync(sessionFile, "persisted child session\n");
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "done",
-      session: { dispose: vi.fn() } as any,
+      session: { dispose: vi.fn(), sessionFile } as any,
       aborted: false,
       steered: false,
     });
@@ -94,7 +96,11 @@ describe("Agent cwd wiring", () => {
     expect(agent.parameters.properties.cwd).toBeDefined();
     expect(agent.parameters.properties.resume.minLength).toBe(1);
     expect(agent.parameters.properties.schedule.minLength).toBe(1);
-    await agent.execute(
+    for (const removed of ["model", "thinking", "max_turns", "inherit_context", "isolated", "isolation"]) {
+      expect(agent.parameters.properties[removed]).toBeUndefined();
+    }
+    expect(tools.get("get_subagent_result").parameters.properties.verbose).toBeUndefined();
+    const result = await agent.execute(
       "cwd-fresh",
       {
         prompt: "inspect the target",
@@ -107,6 +113,8 @@ describe("Agent cwd wiring", () => {
       context(parentCwd),
     );
 
+    expect(textOf(result)).toContain(`Session file: ${sessionFile}`);
+    expect(existsSync(sessionFile)).toBe(true);
     expect(runAgent).toHaveBeenCalledWith(
       expect.objectContaining({ cwd: parentCwd }),
       "general-purpose",

@@ -282,6 +282,13 @@ export function getReadOnlyMemoryToolNames(existingToolNames: Set<string>): stri
   return READONLY_MEMORY_TOOL_NAMES.filter(n => !existingToolNames.has(n));
 }
 
+/** Whether an agent's effective built-in allowlist includes file mutation. */
+export function agentConfigCanWrite(config: AgentConfig | undefined): boolean {
+  const denied = new Set(config?.disallowedTools ?? []);
+  const tools = config?.builtinToolNames ?? BUILTIN_TOOL_NAMES;
+  return tools.some((tool) => (tool === "write" || tool === "edit") && !denied.has(tool));
+}
+
 /** Get built-in tool names for a type (case-insensitive). */
 export function getToolNamesForType(type: string): string[] {
   const key = resolveKey(type);

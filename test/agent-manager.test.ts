@@ -119,101 +119,267 @@ describe("AgentManager — Bug 1 race condition (resultConsumed vs onComplete)",
   });
 });
 
-describe("AgentManager — spawnAndWait onSpawned + foreground output file wiring (#105)", () => {
+describe("AgentManager — governed top-level admission", () => {
   let manager: AgentManager;
-  afterEach(() => manager?.dispose());
 
-  it("fields set on the record in onSpawned are visible when onSessionCreated fires", async () => {
-    // The load-bearing ordering guarantee: onSpawned fires synchronously inside
-    // spawn(), before runAgent's async onSessionCreated fires. index.ts relies on
-    // this to set record.outputFile so streamToOutputFile can pick it up.
-    manager = new AgentManager();
-    let capturedId: string | undefined;
-    let outputFileSeenAtSessionCreated: string | undefined;
-
-    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
-      const session = mockSession();
-      // Yield one microtask to mirror real behavior: in production, onSessionCreated
-      // fires async (after network/session setup). onSpawned fires synchronously
-      // inside spawn() before runAgent's promise even starts. This await lets the
-      // remainder of startAgent (record.promise = …, onSpawned?.()) finish first.
-      await Promise.resolve();
-      opts.onSessionCreated?.(session);
-      outputFileSeenAtSessionCreated = capturedId
-        ? manager.getRecord(capturedId)?.outputFile
-        : undefined;
-      return { responseText: "done", session, aborted: false, steered: false };
-    });
-
-    await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
-      description: "test",
-    }, (fgId) => {
-      capturedId = fgId;
-      manager.getRecord(fgId)!.outputFile = "/fake/agent.jsonl";
-    });
-
-    expect(outputFileSeenAtSessionCreated).toBe("/fake/agent.jsonl");
+  afterEach(() => {
+    manager?.dispose();
+    registerAgents(new Map());
   });
 
-  it("onSpawned id matches the id returned by spawnAndWait", async () => {
+  it("rejects a second active write-class child and names the active writer", () => {
+    registerAgents(new Map([
+      ["writer", {
+        name: "writer", description: "first writer", builtinToolNames: ["write"],
+        extensions: false, skills: false, systemPrompt: "Write.", promptMode: "replace",
+      }],
+      ["reader", {
+        name: "reader", description: "reader", builtinToolNames: ["read"],
+        extensions: false, skills: false, systemPrompt: "Read.", promptMode: "replace",
+      }],
+    ]));
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
     manager = new AgentManager();
-    let spawnedId: string | undefined;
+
+    manager.spawn(mockPi, mockCtx, "writer", "first", { description: "first writer", isBackground: true });
+    expect(() => manager.spawn(mockPi, mockCtx, "writer", "second", {
+      description: "second writer", isBackground: true,
+    })).toThrow('Cannot start write-class agent while "first writer" is active.');
+    expect(() => manager.spawn(mockPi, mockCtx, "reader", "read", {
+      description: "read evidence", isBackground: true,
+    })).not.toThrow();
+  });
+
+  it("rejects a resumed writer while another writer is active", async () => {
+    registerAgents(new Map([["writer", {
+      name: "writer", description: "writer", builtinToolNames: ["edit"],
+      extensions: false, skills: false, systemPrompt: "Write.", promptMode: "replace",
+    }]]));
+    manager = new AgentManager();
     resolvedRun();
+    const first = manager.spawn(mockPi, mockCtx, "writer", "first", {
+      description: "first writer", isBackground: true,
+    });
+    await manager.getRecord(first)!.promise;
 
-    const { id } = await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
-      description: "test",
-    }, (fgId) => { spawnedId = fgId; });
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    manager.spawn(mockPi, mockCtx, "writer", "second", {
+      description: "second writer", isBackground: true,
+    });
 
-    expect(spawnedId).toBe(id);
+    await expect(manager.resume(first, "continue")).rejects.toThrow(
+      'Cannot resume write-class agent while "second writer" is active.',
+    );
   });
 
-  it("restores the shared onSpawned callback before awaiting the foreground run", async () => {
-    manager = new AgentManager();
-    let finishFirst: ((value: any) => void) | undefined;
+  it("keeps the writer reservation until an aborted execution settles", async () => {
+    registerAgents(new Map([["writer", {
+      name: "writer", description: "writer", builtinToolNames: ["write"],
+      extensions: false, skills: false, systemPrompt: "Write.", promptMode: "replace",
+    }]]));
+    let finish!: (value: any) => void;
     vi.mocked(runAgent)
-      .mockImplementationOnce(() => new Promise(resolve => { finishFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }))
       .mockResolvedValueOnce({
-        responseText: "second",
-        session: mockSession(),
-        aborted: false,
-        steered: false,
+        responseText: "second", session: mockSession(), aborted: false, steered: false,
       });
-    const firstCallback = vi.fn();
-
-    const first = manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "first", {
-      description: "first",
-    }, firstCallback);
-    const secondId = manager.spawn(mockPi, mockCtx, "general-purpose", "second", {
-      description: "second",
-      isBackground: true,
+    manager = new AgentManager();
+    const first = manager.spawn(mockPi, mockCtx, "writer", "first", {
+      description: "first writer", isBackground: true,
     });
 
-    expect(firstCallback).toHaveBeenCalledTimes(1);
-    await manager.getRecord(secondId)!.promise;
-    finishFirst?.({
-      responseText: "first",
-      session: mockSession(),
-      aborted: false,
-      steered: false,
-    });
-    await first;
+    expect(manager.abort(first)).toBe(true);
+    expect(() => manager.spawn(mockPi, mockCtx, "writer", "second", {
+      description: "second writer", isBackground: true,
+    })).toThrow('Cannot start write-class agent while "first writer" is active.');
+
+    finish({ responseText: "partial", session: mockSession(), aborted: true, steered: false });
+    await manager.getRecord(first)!.promise;
+    expect(() => manager.spawn(mockPi, mockCtx, "writer", "second", {
+      description: "second writer", isBackground: true,
+    })).not.toThrow();
   });
 
-  it("onComplete fires on the error path with resultConsumed=true", async () => {
-    // The .then path is covered by the lifecycle-symmetry test above; this guards
-    // the .catch path which lacks try/catch around onComplete (a known asymmetry).
-    let completedRecord: AgentRecord | undefined;
-    manager = new AgentManager((r) => { completedRecord = r; });
-    vi.mocked(runAgent).mockRejectedValue(new Error("agent failed"));
+  it("rejects a concurrent resume of the same agent", async () => {
+    registerAgents(new Map([["reader", {
+      name: "reader", description: "reader", builtinToolNames: ["read"],
+      extensions: false, skills: false, systemPrompt: "Read.", promptMode: "replace",
+    }]]));
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "reader", "first", {
+      description: "reader", isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
 
-    const { record } = await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
-      description: "test",
+    let finishResume!: (value: { text: string }) => void;
+    vi.mocked(resumeAgent).mockClear();
+    vi.mocked(resumeAgent).mockImplementationOnce(() => new Promise((resolve) => { finishResume = resolve; }));
+    const firstResume = manager.resume(id, "continue");
+
+    await expect(manager.resume(id, "overlap")).rejects.toThrow("already has an active execution");
+    finishResume({ text: "continued" });
+    await expect(firstResume).resolves.toEqual(expect.objectContaining({ result: "continued" }));
+  });
+
+  it("queues a top-level resume behind the concurrency limit", async () => {
+    registerAgents(new Map([["reader", {
+      name: "reader", description: "reader", builtinToolNames: ["read"],
+      extensions: false, skills: false, systemPrompt: "Read.", promptMode: "replace",
+    }]]));
+    manager = new AgentManager(undefined, 1);
+    resolvedRun();
+    const resumable = manager.spawn(mockPi, mockCtx, "reader", "first", {
+      description: "resumable", isBackground: true,
+    });
+    await manager.getRecord(resumable)!.promise;
+
+    let finishBlocker!: (value: any) => void;
+    vi.mocked(runAgent).mockImplementationOnce(() => new Promise((resolve) => { finishBlocker = resolve; }));
+    const blocker = manager.spawn(mockPi, mockCtx, "reader", "block", {
+      description: "blocker", isBackground: true,
+    });
+    let finishResume!: (value: { text: string }) => void;
+    vi.mocked(resumeAgent).mockClear();
+    vi.mocked(resumeAgent).mockImplementationOnce(() => new Promise((resolve) => { finishResume = resolve; }));
+
+    const resumed = manager.resume(resumable, "continue");
+    expect(manager.getRecord(resumable)?.status).toBe("queued");
+    expect(resumeAgent).not.toHaveBeenCalled();
+
+    finishBlocker({ responseText: "done", session: mockSession(), aborted: false, steered: false });
+    await manager.getRecord(blocker)!.promise;
+    await Promise.resolve();
+    expect(manager.getRecord(resumable)?.status).toBe("running");
+    expect(resumeAgent).toHaveBeenCalledTimes(1);
+
+    finishResume({ text: "continued" });
+    await expect(resumed).resolves.toEqual(expect.objectContaining({ result: "continued" }));
+  });
+
+  it("cancels a queued foreground child before it can start", async () => {
+    registerAgents(new Map([
+      ["reader", {
+        name: "reader", description: "reader", builtinToolNames: ["read"],
+        extensions: false, skills: false, systemPrompt: "Read.", promptMode: "replace",
+      }],
+      ["writer", {
+        name: "writer", description: "writer", builtinToolNames: ["edit"],
+        extensions: false, skills: false, systemPrompt: "Write.", promptMode: "replace",
+      }],
+    ]));
+    let finishBlocker!: (value: any) => void;
+    vi.mocked(runAgent).mockClear();
+    vi.mocked(runAgent).mockImplementationOnce(() => new Promise((resolve) => { finishBlocker = resolve; }));
+    manager = new AgentManager(undefined, 1);
+    const blocker = manager.spawn(mockPi, mockCtx, "reader", "block", {
+      description: "blocker", isBackground: true,
+    });
+    const controller = new AbortController();
+    const writer = manager.spawnAndWait(mockPi, mockCtx, "writer", "write", {
+      description: "queued writer", signal: controller.signal,
+    });
+    expect(manager.listAgents().find((record) => record.description === "queued writer")?.status).toBe("queued");
+
+    controller.abort();
+    await expect(writer).resolves.toEqual(expect.objectContaining({
+      record: expect.objectContaining({ status: "stopped" }),
+    }));
+    expect(runAgent).toHaveBeenCalledTimes(1);
+
+    finishBlocker({ responseText: "done", session: mockSession(), aborted: false, steered: false });
+    await manager.getRecord(blocker)!.promise;
+    expect(runAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps persistence settings private to each manager", async () => {
+    registerAgents(new Map([["reader", {
+      name: "reader", description: "reader", builtinToolNames: ["read"],
+      extensions: false, skills: false, systemPrompt: "Read.", promptMode: "replace",
+    }]]));
+    resolvedRun();
+    const firstManager = new AgentManager();
+    const secondManager = new AgentManager();
+    firstManager.setPersistSessionDefault(true);
+    firstManager.setSessionDirDefault("/sessions/first");
+    secondManager.setPersistSessionDefault(false);
+    secondManager.setSessionDirDefault("/sessions/second");
+    try {
+      const first = firstManager.spawn(mockPi, mockCtx, "reader", "first", { description: "first" });
+      const second = secondManager.spawn(mockPi, mockCtx, "reader", "second", { description: "second" });
+      await Promise.all([firstManager.getRecord(first)!.promise, secondManager.getRecord(second)!.promise]);
+
+      expect(vi.mocked(runAgent).mock.calls.at(-2)?.[3]).toEqual(expect.objectContaining({
+        persistSessionDefault: true,
+        sessionDirDefault: "/sessions/first",
+      }));
+      expect(vi.mocked(runAgent).mock.calls.at(-1)?.[3]).toEqual(expect.objectContaining({
+        persistSessionDefault: false,
+        sessionDirDefault: "/sessions/second",
+      }));
+    } finally {
+      firstManager.dispose();
+      secondManager.dispose();
+    }
+  });
+
+  it("treats denied mutation tools as read-only", () => {
+    registerAgents(new Map([["nominal-writer", {
+      name: "nominal-writer", description: "read-only", builtinToolNames: ["read", "write"],
+      disallowedTools: ["write"], extensions: false, skills: false,
+      systemPrompt: "Read.", promptMode: "replace",
+    }]]));
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    manager = new AgentManager();
+
+    manager.spawn(mockPi, mockCtx, "nominal-writer", "first", {
+      description: "first reader", isBackground: true,
+    });
+    expect(() => manager.spawn(mockPi, mockCtx, "nominal-writer", "second", {
+      description: "second reader", isBackground: true,
+    })).not.toThrow();
+  });
+
+  it("queues a foreground child when a top-level slot is occupied", async () => {
+    registerAgents(new Map([["reader", {
+      name: "reader", description: "reader", builtinToolNames: ["read"],
+      extensions: false, skills: false, systemPrompt: "Read.", promptMode: "replace",
+    }]]));
+    let finishFirst: ((value: any) => void) | undefined;
+    let finishSecond: ((value: any) => void) | undefined;
+    vi.mocked(runAgent).mockImplementation(() => new Promise((resolve) => {
+      if (!finishFirst) finishFirst = resolve;
+      else finishSecond = resolve;
+    }));
+    manager = new AgentManager(undefined, 1);
+
+    const firstId = manager.spawn(mockPi, mockCtx, "reader", "first", {
+      description: "first reader", isBackground: true,
+    });
+    const foreground = manager.spawnAndWait(mockPi, mockCtx, "reader", "second", {
+      description: "second reader",
+    });
+    expect(manager.listAgents().find((record) => record.description === "second reader")?.status).toBe("queued");
+
+    finishFirst?.({ responseText: "first", session: mockSession(), aborted: false, steered: false });
+    await manager.getRecord(firstId)!.promise;
+    await Promise.resolve();
+    expect(manager.listAgents().find((record) => record.description === "second reader")?.status).toBe("running");
+
+    finishSecond?.({ responseText: "second", session: mockSession(), aborted: false, steered: false });
+    await expect(foreground).resolves.toEqual(expect.objectContaining({ record: expect.objectContaining({ result: "second" }) }));
+  });
+
+  it("records the child Pi session file", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done", session: { ...mockSession(), sessionFile: "/configured/sessions/child.jsonl" },
+      aborted: false, steered: false,
     });
 
-    expect(completedRecord).toBeDefined();
-    expect(completedRecord!.status).toBe("error");
-    expect(completedRecord!.resultConsumed).toBe(true);
-    expect(record).toBe(completedRecord);
+    const { record } = await manager.spawnAndWait(mockPi, mockCtx, "reader", "work", { description: "persisted reader" });
+
+    expect(record.sessionFile).toBe("/configured/sessions/child.jsonl");
   });
 });
 
@@ -273,6 +439,10 @@ describe("AgentManager — nested runtime propagation", () => {
   });
 
   it("starts a nested background child even when the concurrency pool is full", async () => {
+    registerAgents(new Map([["reader", {
+      name: "reader", description: "reader", builtinToolNames: ["read"],
+      extensions: false, skills: false, systemPrompt: "Read.", promptMode: "replace",
+    }]]));
     // A parent holding the only slot and waiting on its own child would
     // otherwise deadlock: the child can never be drained from the queue.
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
@@ -289,7 +459,7 @@ describe("AgentManager — nested runtime propagation", () => {
       parentAgentId: parentId,
     });
     // A second top-level background agent still queues — the pool is untouched.
-    const siblingId = manager.spawn(mockPi, mockCtx, "general-purpose", "sibling", {
+    const siblingId = manager.spawn(mockPi, mockCtx, "reader", "sibling", {
       description: "sibling",
       isBackground: true,
     });
@@ -433,6 +603,10 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
   });
 
   it("clearCompleted does not remove running or queued agents", async () => {
+    registerAgents(new Map([["reader", {
+      name: "reader", description: "reader", builtinToolNames: ["read"],
+      extensions: false, skills: false, systemPrompt: "Read.", promptMode: "replace",
+    }]]));
     // Use maxConcurrent=0 to keep agents queued, then spawn one running via foreground
     manager = new AgentManager(undefined, 1);
 
@@ -441,12 +615,12 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
       () => new Promise(() => {}), // hangs forever
     );
 
-    const id1 = manager.spawn(mockPi, mockCtx, "general-purpose", "test1", {
+    const id1 = manager.spawn(mockPi, mockCtx, "reader", "test1", {
       description: "running agent",
       isBackground: true,
     });
     // Second agent should be queued (limit=1)
-    const id2 = manager.spawn(mockPi, mockCtx, "general-purpose", "test2", {
+    const id2 = manager.spawn(mockPi, mockCtx, "reader", "test2", {
       description: "queued agent",
       isBackground: true,
     });
@@ -938,10 +1112,13 @@ describe("AgentManager — abort() state machine", () => {
     manager = new AgentManager(undefined, 1);
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
 
-    manager.spawn(mockPi, mockCtx, "X", "blocker", { description: "block", isBackground: true });
+    manager.spawn(mockPi, mockCtx, "X", "blocker", {
+      description: "block", isBackground: true, writeClass: false,
+    });
     const queuedId = manager.spawn(mockPi, mockCtx, "Y", "queued", {
       description: "q",
       isBackground: true,
+      writeClass: false,
     });
     const queuedRecord = manager.getRecord(queuedId)!;
     expect(queuedRecord.status).toBe("queued");
@@ -1096,9 +1273,9 @@ describe("AgentManager — listAgents() ordering", () => {
     manager = new AgentManager();
     resolvedRun();
 
-    const a = manager.spawn(mockPi, mockCtx, "X", "1", { description: "a" });
-    const b = manager.spawn(mockPi, mockCtx, "X", "2", { description: "b" });
-    const c = manager.spawn(mockPi, mockCtx, "X", "3", { description: "c" });
+    const a = manager.spawn(mockPi, mockCtx, "X", "1", { description: "a", writeClass: false });
+    const b = manager.spawn(mockPi, mockCtx, "X", "2", { description: "b", writeClass: false });
+    const c = manager.spawn(mockPi, mockCtx, "X", "3", { description: "c", writeClass: false });
 
     // Force deterministic startedAt — Date.now() can collide on fast runs
     manager.getRecord(a)!.startedAt = 100;
@@ -1120,10 +1297,12 @@ describe("AgentManager — abortAll", () => {
     const running = manager.spawn(mockPi, mockCtx, "X", "r", {
       description: "r",
       isBackground: true,
+      writeClass: false,
     });
     const queued = manager.spawn(mockPi, mockCtx, "Y", "q", {
       description: "q",
       isBackground: true,
+      writeClass: false,
     });
     expect(manager.getRecord(running)?.status).toBe("running");
     expect(manager.getRecord(queued)?.status).toBe("queued");
@@ -1163,8 +1342,12 @@ describe("AgentManager — hasRunning", () => {
     manager = new AgentManager(undefined, 1);
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
 
-    manager.spawn(mockPi, mockCtx, "X", "r", { description: "r", isBackground: true });
-    manager.spawn(mockPi, mockCtx, "Y", "q", { description: "q", isBackground: true });
+    manager.spawn(mockPi, mockCtx, "X", "r", {
+      description: "r", isBackground: true, writeClass: false,
+    });
+    manager.spawn(mockPi, mockCtx, "Y", "q", {
+      description: "q", isBackground: true, writeClass: false,
+    });
     expect(manager.hasRunning()).toBe(true);
   });
 });

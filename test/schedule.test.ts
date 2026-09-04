@@ -7,7 +7,7 @@
  *   - Fire path (interval, one-shot) with mocked AgentManager + fake timers
  *   - Past-timestamp rejection
  *   - One-shot auto-disable
- *   - Concurrency-bypass option flows through to manager.spawn
+ *   - Scheduled fires share the regular concurrency queue
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
@@ -451,7 +451,42 @@ describe("SubagentScheduler — fire path", () => {
     expect(manager.spawn).toHaveBeenCalledTimes(1);
   });
 
-  it("fire passes bypassQueue: true to manager.spawn", () => {
+  it("fire uses role-owned invocation policy", () => {
+    registerAgents(new Map([["scheduled-role", {
+      name: "scheduled-role",
+      description: "Scheduled role",
+      builtinToolNames: ["read"],
+      extensions: false,
+      skills: false,
+      systemPrompt: "Run on schedule.",
+      promptMode: "replace",
+      thinking: "high",
+      maxTurns: 9,
+      isolated: true,
+      isolation: "worktree",
+    }]]));
+    scheduler.addJob({
+      name: "governed", description: "governed", schedule: "1s",
+      subagent_type: "scheduled-role", prompt: "x",
+    });
+
+    vi.advanceTimersByTime(1_000);
+
+    expect(manager.spawn).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      "scheduled-role",
+      "x",
+      expect.objectContaining({
+        maxTurns: 9,
+        thinkingLevel: "high",
+        isolated: true,
+        isolation: "worktree",
+      }),
+    );
+  });
+
+  it("fire uses the regular concurrency queue", () => {
     scheduler.addJob({
       name: "every-1s", description: "x", schedule: "1s",
       subagent_type: "general-purpose", prompt: "x",
@@ -460,7 +495,7 @@ describe("SubagentScheduler — fire path", () => {
     vi.advanceTimersByTime(1_000);
     expect(manager.spawn).toHaveBeenCalledTimes(1);
     const optsArg = manager.spawn.mock.calls[0][4];
-    expect(optsArg.bypassQueue).toBe(true);
+    expect(optsArg.bypassQueue).toBeUndefined();
     expect(optsArg.isBackground).toBe(true);
   });
 

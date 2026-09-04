@@ -8,22 +8,23 @@
  *
  * Differences vs pi-cron-schedule:
  *   - Persistence is via ScheduleStore (PID-locked, session-scoped, atomic).
- *   - `executeJob` calls `manager.spawn(..., { bypassQueue: true })` instead
- *     of dispatching a user message — schedule fires bypass maxConcurrent so
- *     a 5-minute interval can't be deferred behind 4 long-running agents.
+ *   - `executeJob` calls `manager.spawn(...)` instead of dispatching a user
+ *     message, so scheduled runs share the normal lifecycle and queue.
  *   - Result delivery is implicit: spawn → background completion → existing
  *     `subagent-notification` followUp path. No new delivery code.
  */
 
+import type { Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Cron } from "croner";
 import { nanoid } from "nanoid";
 import type { AgentManager } from "./agent-manager.js";
 import { getAgentConfig, resolveSpawnType } from "./agent-types.js";
 import { isDocumentationAuditorType } from "./documentation-audit.js";
+import { resolveAgentInvocationConfig } from "./invocation-config.js";
 import { resolveModel } from "./model-resolver.js";
 import type { ScheduleStore } from "./schedule-store.js";
-import type { IsolationMode, ModelAuthority, ScheduledSubagent, SubagentType, ThinkingLevel } from "./types.js";
+import type { ModelAuthority, ScheduledSubagent, SubagentType } from "./types.js";
 
 /** Event emitted on `pi.events` for cross-extension consumers. */
 export type ScheduleChangeEvent =
@@ -50,11 +51,6 @@ export interface NewJobInput {
   schedule: string;
   subagent_type: SubagentType;
   prompt: string;
-  model?: string;
-  thinking?: ThinkingLevel;
-  max_turns?: number;
-  isolated?: boolean;
-  isolation?: IsolationMode;
 }
 
 export class SubagentScheduler {
@@ -125,11 +121,6 @@ export class SubagentScheduler {
       intervalMs: detected.intervalMs,
       subagent_type: input.subagent_type,
       prompt: input.prompt,
-      model: input.model,
-      thinking: input.thinking,
-      max_turns: input.max_turns,
-      isolated: input.isolated,
-      isolation: input.isolation,
       enabled: true,
       createdAt: new Date().toISOString(),
       runCount: 0,
@@ -259,7 +250,8 @@ export class SubagentScheduler {
     // never silently become an unpinned run.
     let dispatch: ReturnType<typeof resolveSpawnType>;
     let modelAuthority: ModelAuthority;
-    let resolvedModel: any | undefined;
+    let invocation: ReturnType<typeof resolveAgentInvocationConfig>;
+    let resolvedModel: Model<any> | undefined;
     try {
       // Re-resolve at fire time against the registry as it stands. This does not
       // reload from disk (the scheduler has no reason to rebuild process-global
@@ -268,10 +260,11 @@ export class SubagentScheduler {
       dispatch = resolveSpawnType(job.subagent_type);
       if (!dispatch.ok) throw new Error(dispatch.message);
       assertSchedulableType(job.subagent_type);
-      modelAuthority = { configuredModel: getAgentConfig(dispatch.type)?.model };
-      const modelInput = modelAuthority.configuredModel ?? job.model;
-      if (modelInput) {
-        const resolved = resolveModel(modelInput, ctx.modelRegistry);
+      const config = getAgentConfig(dispatch.type);
+      invocation = resolveAgentInvocationConfig(config, { run_in_background: true });
+      modelAuthority = { configuredModel: config?.model };
+      if (invocation.modelInput) {
+        const resolved = resolveModel(invocation.modelInput, ctx.modelRegistry);
         if (typeof resolved === "string") throw new Error(resolved);
         resolvedModel = resolved;
       }
@@ -294,13 +287,13 @@ export class SubagentScheduler {
       agentId = manager.spawn(pi, ctx, dispatch.type, job.prompt, {
         description: job.description,
         isBackground: true,
-        bypassQueue: true,
         model: resolvedModel,
         modelAuthority,
-        maxTurns: job.max_turns,
-        isolated: job.isolated,
-        thinkingLevel: job.thinking,
-        isolation: job.isolation,
+        maxTurns: invocation.maxTurns,
+        isolated: invocation.isolated,
+        inheritContext: invocation.inheritContext,
+        thinkingLevel: invocation.thinking,
+        isolation: invocation.isolation,
       });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
@@ -335,7 +328,7 @@ export class SubagentScheduler {
         })
         .catch(() => finalize("error"));
     } else {
-      // Spawn returned without a promise (defensive — bypassQueue path always sets one).
+      // Spawn returned without a promise (defensive — every started record sets one).
       finalize("success");
     }
   }

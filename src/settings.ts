@@ -33,17 +33,9 @@ export interface SubagentsSettings {
    * (`<agentDir>/settings.json`) and project-local (`<cwd>/.pi/settings.json`),
    * with project overriding global (mirrors pi's SettingsManager deep-merge).
    *
-   * scopeModels guards against runtime LLM choices, not user-level config.
-   * Out-of-scope handling reflects this:
-   *   - Caller-supplied via `Agent({ model: "..." })` (only when frontmatter
-   *     has no `model:`, since frontmatter is authoritative): hard error
-   *     returned to the orchestrator, listing the allowed models. The LLM
-   *     made an explicit out-of-scope choice and gets explicit feedback.
-   *   - Frontmatter-pinned: warning toast + the pinned model runs. The
-   *     agent's author/installer chose this; trust it.
-   *   - Parent-inherited (neither caller nor frontmatter sets a model):
-   *     warning toast + parent's model runs. The user chose the parent's
-   *     model when starting the session; trust it.
+   * scopeModels checks role-frontmatter pins and parent-inherited models.
+   * An out-of-scope role pin or parent model emits a warning and runs because
+   * the user-level role or parent configuration remains authoritative.
    *
    * No-op when pi's `enabledModels` is empty or absent — nothing to validate
    * against. Defaults to false: subagents may use any model.
@@ -84,17 +76,10 @@ export interface SubagentsSettings {
    * widget).
    */
   widgetMode?: WidgetMode;
-  /**
-   * Project/global default for writing each subagent's `.output` transcript
-   * (a JSON-lines copy of the run, stored under the OS temp dir).
-   * Defaults to `true`. Set `false` to make transcripts opt-in for the whole
-   * project (e.g. a repo that shouldn't leave run transcripts on disk for backup
-   * or DLP tooling to ingest). A custom agent's `output_transcript` frontmatter
-   * overrides this per agent. This governs only the transcript — it does NOT
-   * affect the persisted pi session (`persist_session`), worktree commits
-   * (`isolation: worktree`), or memory files.
-   */
-  outputTranscript?: boolean;
+  /** Persist child Pi sessions by default. Role frontmatter overrides this setting. */
+  persistSession?: boolean;
+  /** Session directory for persisted child Pi sessions. Role frontmatter overrides this setting. */
+  sessionDir?: string;
   /**
    * Hard ceiling on nested subagent delegation, counted from the main session:
    * main = 0, its subagents = 1, their children = 2. Defaults to `2`; `0` or `1`
@@ -133,7 +118,8 @@ export interface SettingsAppliers {
   setToolDescriptionMode: (mode: ToolDescriptionMode) => void;
   setFleetView: (b: boolean) => void;
   setWidgetMode: (mode: WidgetMode) => void;
-  setOutputTranscript: (b: boolean) => void;
+  setPersistSession: (b: boolean) => void;
+  setSessionDir: (path: string | undefined) => void;
   setMaxSubagentDepth: (n: number) => void;
   setFallbackSubagent: (v: string | undefined) => void;
 }
@@ -207,8 +193,11 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.widgetMode === "string" && VALID_WIDGET_MODES.has(r.widgetMode)) {
     out.widgetMode = r.widgetMode as WidgetMode;
   }
-  if (typeof r.outputTranscript === "boolean") {
-    out.outputTranscript = r.outputTranscript;
+  if (typeof r.persistSession === "boolean") {
+    out.persistSession = r.persistSession;
+  }
+  if (typeof r.sessionDir === "string" && r.sessionDir.trim()) {
+    out.sessionDir = r.sessionDir.trim();
   }
   if (r.fallbackSubagent === false) {
     // The only non-string spelling worth accepting: a boolean would otherwise be
@@ -282,7 +271,8 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (s.toolDescriptionMode) appliers.setToolDescriptionMode(s.toolDescriptionMode);
   if (typeof s.fleetView === "boolean") appliers.setFleetView(s.fleetView);
   if (s.widgetMode) appliers.setWidgetMode(s.widgetMode);
-  if (typeof s.outputTranscript === "boolean") appliers.setOutputTranscript(s.outputTranscript);
+  if (typeof s.persistSession === "boolean") appliers.setPersistSession(s.persistSession);
+  if (typeof s.sessionDir === "string") appliers.setSessionDir(s.sessionDir);
 }
 
 /**
