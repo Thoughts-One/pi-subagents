@@ -23,7 +23,7 @@
  *
  * MODEL BACKEND (faux default, real opt-in)
  * -----------------------------------------
- *   - Faux (default): a scripted `registerFauxProvider` model drives both the
+ *   - Faux (default): a scripted faux provider drives both the
  *     parent and the spawned child deterministically — no network, CI-safe. You
  *     supply a `respond(context)` function (or raw `steps`) that emits the
  *     `Agent` tool call on the parent and a reply on the child. `routeBySession`
@@ -43,7 +43,7 @@
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   type AssistantMessage,
@@ -56,19 +56,23 @@ import {
   type Model,
   type ToolCall,
 } from "@earendil-works/pi-ai";
+import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import {
   type AgentSession,
   type AgentSessionEvent,
   createAgentSession,
   DefaultResourceLoader,
   getAgentDir,
+  ModelRuntime,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { getModel, registerFauxProvider } from "./pi-ai.js";
+import { getModel } from "./pi-ai.js";
 
-/** Path to the pi-subagents extension entrypoint (repo `src/index.ts`). */
-const EXTENSION_PATH = fileURLToPath(new URL("../../src/index.ts", import.meta.url));
+/** Package entrypoint under test. The override verifies a clean production install. */
+const EXTENSION_PATH = process.env.PI_SUBAGENTS_E2E_EXTENSION
+  ? resolve(process.env.PI_SUBAGENTS_E2E_EXTENSION)
+  : fileURLToPath(new URL("../../src/index.ts", import.meta.url));
 
 /** The cross-package handle the extension publishes on a global Symbol. */
 const MANAGER_KEY = Symbol.for("pi-subagents:manager");
@@ -161,7 +165,7 @@ export interface PrintModeRun {
   modelCalls: number;
   /**
    * Tear down: emit session_shutdown (so extensions clear timers), dispose the
-   * session, unregister faux, restore cwd/env, rm temp dir. Async — await it.
+   * session, restore cwd/env, rm temp dir. Async — await it.
    */
   dispose: () => Promise<void>;
 }
@@ -275,9 +279,9 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
   }
 
   // --- model backend ---
-  let faux: ReturnType<typeof registerFauxProvider> | undefined;
+  let faux: ReturnType<typeof fauxProvider> | undefined;
   let model: Model<string> | undefined;
-  let modelRegistry: unknown;
+  let modelRuntime: ModelRuntime | undefined;
   if (live) {
     // Explicit pin wins (options.live or PI_PROVIDER + PI_MODEL). Otherwise leave
     // `model` undefined: createAgentSession then calls findInitialModel() against
@@ -300,29 +304,19 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
         );
       }
     }
-    modelRegistry = undefined; // let createAgentSession build the real, auth-backed registry
   } else {
     if (!options.steps && !options.respond) {
       throw new Error("runPrintMode (faux mode): provide `respond` or `steps`");
     }
-    faux = registerFauxProvider({ provider: "faux", models: [{ id: "faux-1", contextWindow: 200_000 }] });
+    faux = fauxProvider({ provider: "faux", models: [{ id: "faux-1", contextWindow: 200_000 }] });
     model = faux.getModel();
-    // Structural faux registry (matches the existing e2e suites): the parent
-    // session uses `model` directly; subagents inherit it via ctx.model since
-    // resolveDefaultModel falls back to the parent model when no model is pinned.
-    modelRegistry = {
-      find: () => model,
-      getAll: () => [model],
-      getAvailable: () => [model],
-      hasConfiguredAuth: () => true,
-      isUsingOAuth: () => false,
-      // createAgentSession's injected streamFn checks `auth.ok` and throws
-      // Error(auth.error) otherwise — so the `ok: true` flag is mandatory, not
-      // cosmetic. Without it the turn dies before streaming (empty error message).
-      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "faux", headers: {} }),
-      registerProvider: () => {},
-      unregisterProvider: () => {},
-    };
+    modelRuntime = await ModelRuntime.create({
+      authPath: join(hermeticDir ?? cwd, "auth.json"),
+      modelsPath: null,
+      refreshOnCreate: false,
+    });
+    modelRuntime.registerNativeProvider(faux.provider);
+    await modelRuntime.setRuntimeApiKey("faux", "faux");
 
     // Pad the response queue: one context-branching responder per expected model
     // call. The queue is a single FIFO shared by parent + child, but every entry
@@ -365,8 +359,7 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     cwd,
     agentDir,
     model,
-    // Structural faux registry in faux mode; undefined in live mode (defaults).
-    modelRegistry: modelRegistry as any,
+    modelRuntime,
     resourceLoader: loader,
     sessionManager: SessionManager.inMemory(cwd),
     // Live: real settings so an omitted model resolves to your local default
@@ -440,7 +433,6 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     } catch {
       /* ignore */
     }
-    faux?.unregister();
     delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
     // Restore cwd before removing the temp dir (can't rm the dir you're in).
     try {

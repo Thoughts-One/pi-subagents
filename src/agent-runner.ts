@@ -15,6 +15,7 @@ import {
   type ExtensionAPI,
   getAgentDir,
   loadProjectContextFiles,
+  type ModelRuntime,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -499,11 +500,11 @@ function installCompactionUsageCapture(
   session: AgentSession,
   onUsage: ((event: AttributedUsageEvent) => void) | undefined,
 ): void {
-  const originalStream = session.agent.streamFn;
+  const originalStream = session.agent.streamFunction;
   if (!originalStream || !onUsage) return;
 
   let pending: AttributedUsageEvent[] | undefined;
-  session.agent.streamFn = async (...args) => {
+  session.agent.streamFunction = async (...args) => {
     const stream = await originalStream(...args);
     const result = stream.result.bind(stream);
     stream.result = async () => {
@@ -854,10 +855,10 @@ export async function runAgent(
   // Pi 0.80.8 replaced createAgentSession's modelRegistry option with
   // modelRuntime, but ExtensionContext still exposes only the registry facade.
   // Pass both so the full supported Pi range retains the parent's providers.
-  const parentModelRuntime = (ctx.modelRegistry as unknown as { runtime?: unknown }).runtime;
+  const parentModelRuntime = (ctx.modelRegistry as unknown as { runtime?: ModelRuntime }).runtime;
   const sessionOpts: Parameters<typeof createAgentSession>[0] & {
     modelRegistry: ExtensionContext["modelRegistry"];
-    modelRuntime?: unknown;
+    modelRuntime?: ModelRuntime;
   } = {
     cwd: effectiveCwd,
     agentDir,

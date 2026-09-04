@@ -698,14 +698,14 @@ describe("agent-runner usage callback wiring", () => {
       usage: { input: 11, output: 12, cacheRead: 13, cacheWrite: 14, cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 } },
     };
     const stream = { result: vi.fn(async () => response) };
-    session.agent.streamFn = vi.fn(async () => stream);
+    session.agent.streamFunction = vi.fn(async () => stream);
     const seen: any[] = [];
     session.prompt = vi.fn(async () => {
       for (const listener of listeners) listener({ type: "compaction_start", reason: "threshold" });
-      await (await session.agent.streamFn({ provider: "anthropic", id: "claude-child" }, {}, {})).result();
+      await (await session.agent.streamFunction({ provider: "anthropic", id: "claude-child" }, {}, {})).result();
       for (const listener of listeners) listener({ type: "compaction_end", aborted: false, reason: "threshold", result: { tokensBefore: 123 } });
       for (const listener of listeners) listener({ type: "compaction_start", reason: "manual" });
-      await (await session.agent.streamFn({ provider: "anthropic", id: "claude-child" }, {}, {})).result();
+      await (await session.agent.streamFunction({ provider: "anthropic", id: "claude-child" }, {}, {})).result();
       for (const listener of listeners) listener({ type: "compaction_end", aborted: true, reason: "manual", result: undefined });
       session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
     });

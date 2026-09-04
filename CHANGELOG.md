@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Bracketed role labels in Agent calls.** Inline Agent headers now render the role name, such as `[Explore]`, with the theme's custom-message label color so the active specialist is visually distinct from its task description.
 - **Governed child lifecycle.** Child Pi sessions now persist by default, with manager-wide `persistSession` and `sessionDir` settings and role-frontmatter overrides. Results and notifications name the child session file. Every top-level child now shares `maxConcurrent`, including foreground calls, and only one write-class child can be active in one parent session.
 - **Role-owned execution policy.** The `Agent` and nested `Agent` schemas no longer accept caller overrides for model, thinking, turn limits, context inheritance, hermetic mode, or worktree isolation. Role frontmatter remains the authority for those fields.
+- **Host-provided Pi core packages.** Pi core imports are optional peers, so Pi's production package install no longer copies the host's coding-agent, AI, and TUI dependency trees into this package. Development keeps exact Pi versions in `devDependencies` so tests and type checking still run against the deployed API.
 
 ### Removed
 - **BREAKING: Parent-prompt append mode.** Removed `prompt_mode`, parent-prompt bridging, and the `twin` UI label. Remove `prompt_mode` from custom agents and put required instructions in the role body. Every child uses that body plus Pi-loaded project context from its effective working directory.
