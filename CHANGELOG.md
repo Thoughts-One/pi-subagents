@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-> **⚠️ Breaking: `prompt_mode` and parent-prompt append behavior are removed.** Remove `prompt_mode` from custom agents and put required instructions in the role body. Pi adds the effective working directory's `AGENTS.md` or `CLAUDE.md` context to each child.
+> **⚠️ Breaking: `prompt_mode` and parent-prompt append behavior are removed, and this revision requires Pi 0.85 or newer.** Remove `prompt_mode` from custom agents and put required instructions in the role body. Pi adds the effective working directory's `AGENTS.md` or `CLAUDE.md` context to each child.
 
 ### Added
 - **The public `Agent` tool can run a fresh subagent in another working directory.** Its optional absolute `cwd` parameter now reaches the existing cross-repository spawn boundary, so tools and the environment operate in the target while extensions, skills, settings, and memory remain anchored to the parent project. `AGENTS.md` and `CLAUDE.md` load from the target. Invalid paths fail before child side effects, worktree isolation still branches from the target repository, and `cwd` is rejected with resume or scheduling rather than being silently ignored.

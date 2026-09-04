@@ -34,6 +34,8 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 
 ## Install
 
+Requires Pi 0.85 or newer.
+
 ```bash
 pi install npm:@tintinweb/pi-subagents
 ```
