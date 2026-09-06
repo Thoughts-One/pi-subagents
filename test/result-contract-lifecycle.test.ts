@@ -10,10 +10,11 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { resumeAgent, runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
+import { planAuthorityModel } from "./plan-authority-fixture.js";
 
 const validReceipt = `Claude-Subagent-Receipt: ${JSON.stringify({
   role: "planner",
-  model: "claude-fable-5",
+  model: planAuthorityModel,
   outcome: "success",
   input_tokens: 1,
   output_tokens: 2,

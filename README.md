@@ -320,7 +320,7 @@ The tool canonicalizes paths, rejects aliases and root escapes, and renders a de
 
 Set `result_contract: plan-authority` in Plan frontmatter to enforce outer provenance. A valid result begins on its first physical line with exactly one of:
 
-- `Claude-Subagent-Receipt: <json>` for fixed `claude-fable-5` success or failure.
+- `Claude-Subagent-Receipt: <json>` for success or failure from the exact authority model declared in [`plan-authority-contract.json`](plan-authority-contract.json).
 - `Plan-Fallback-Receipt: <json>` for a disclosed Fable failure and `openai-codex/gpt-5.6-sol` author.
 
 Receipt JSON has an exact key set. Missing, malformed, unknown, or non-leading provenance changes the package record to `error`; its raw result remains available for diagnosis. The validator checks receipt shape and authority identity, not plan quality.

@@ -8,6 +8,7 @@ import { registerAgents } from "../src/agent-types.js";
 import { prepareDocumentationAudit } from "../src/documentation-audit.js";
 import type { AgentRecord } from "../src/types.js";
 import { getLifetimeComponents } from "../src/usage.js";
+import { planAuthorityModel } from "./plan-authority-fixture.js";
 
 vi.mock("../src/agent-runner.js", () => ({
   runAgent: vi.fn(),
@@ -1440,7 +1441,7 @@ describe("AgentManager — result contracts", () => {
     registerPlanContract();
     const receipt = {
       role: "planner",
-      model: "claude-fable-5",
+      model: planAuthorityModel,
       outcome: "success",
       input_tokens: 1,
       output_tokens: 1,
