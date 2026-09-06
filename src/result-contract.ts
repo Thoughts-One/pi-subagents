@@ -2,9 +2,10 @@ import { readFileSync } from "node:fs";
 import type { ResultContract } from "./types.js";
 
 interface PlanAuthorityContract {
-  schema_version: 1;
+  schema_version: 2;
   claude_prefix: string;
   fallback_prefix: string;
+  authority_model: string;
   claude_receipt_keys: string[];
   fallback_receipt_keys: string[];
   fallback_receipt_template: Record<string, unknown>;
@@ -15,8 +16,14 @@ interface PlanAuthorityContract {
 const PLAN_AUTHORITY_CONTRACT = JSON.parse(
   readFileSync(new URL("../plan-authority-contract.json", import.meta.url), "utf8"),
 ) as PlanAuthorityContract;
-if (PLAN_AUTHORITY_CONTRACT.schema_version !== 1) {
+if (PLAN_AUTHORITY_CONTRACT.schema_version !== 2) {
   throw new Error("Unsupported Plan authority contract schema.");
+}
+if (typeof PLAN_AUTHORITY_CONTRACT.authority_model !== "string" || !/^\S+$/.test(PLAN_AUTHORITY_CONTRACT.authority_model)) {
+  throw new Error("Plan authority contract requires one exact authority model.");
+}
+if (PLAN_AUTHORITY_CONTRACT.fallback_receipt_template.authority_model !== PLAN_AUTHORITY_CONTRACT.authority_model) {
+  throw new Error("Plan fallback receipt authority model differs from the authority contract.");
 }
 if (
   Object.keys(PLAN_AUTHORITY_CONTRACT.fallback_receipt_template).sort().join("\0")
@@ -64,7 +71,9 @@ function validateClaudeReceipt(receipt: Receipt): string | undefined {
   const keyError = exactKeys(receipt, CLAUDE_RECEIPT_KEYS, "Claude-Subagent-Receipt");
   if (keyError) return keyError;
   if (receipt.role !== "planner") return 'Claude-Subagent-Receipt role must be "planner".';
-  if (receipt.model !== "claude-fable-5") return 'Claude-Subagent-Receipt model must be "claude-fable-5".';
+  if (receipt.model !== PLAN_AUTHORITY_CONTRACT.authority_model) {
+    return "Claude-Subagent-Receipt model differs from the authority contract.";
+  }
   if (receipt.outcome !== "success" && receipt.outcome !== "failure") {
     return 'Claude-Subagent-Receipt outcome must be "success" or "failure".';
   }

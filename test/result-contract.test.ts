@@ -1,9 +1,14 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { validatePlanAuthorityResult, validateResultContract } from "../src/result-contract.js";
 
+const authorityModel = (JSON.parse(
+  readFileSync(new URL("../plan-authority-contract.json", import.meta.url), "utf8"),
+) as { authority_model: string }).authority_model;
+
 const claudeReceipt = {
   role: "planner",
-  model: "claude-fable-5",
+  model: authorityModel,
   outcome: "success",
   input_tokens: 1,
   output_tokens: 2,
@@ -17,7 +22,7 @@ const claudeReceipt = {
 
 const fallbackReceipt = {
   role: "planner",
-  authority_model: "claude-fable-5",
+  authority_model: authorityModel,
   authority_outcome: "failure",
   failure_class: "process",
   author_model: "openai-codex/gpt-5.6-sol",
@@ -39,8 +44,12 @@ describe("Plan authority result contract", () => {
     }))).toBeUndefined();
   });
 
-  it("accepts the disclosed Sol fallback receipt", () => {
+  it("accepts disclosed Sol fallback receipts for process and structured-output failures", () => {
     expect(validatePlanAuthorityResult(withHeader("Plan-Fallback-Receipt", fallbackReceipt))).toBeUndefined();
+    expect(validatePlanAuthorityResult(withHeader("Plan-Fallback-Receipt", {
+      ...fallbackReceipt,
+      failure_class: "structured-output",
+    }))).toBeUndefined();
   });
 
   it("rejects the three frozen missing-provenance results", () => {
@@ -62,7 +71,8 @@ describe("Plan authority result contract", () => {
 
   it("rejects incorrect authority identity and fallback class", () => {
     expect(validatePlanAuthorityResult(withHeader("Claude-Subagent-Receipt", { ...claudeReceipt, role: "other" }))).toContain("role");
-    expect(validatePlanAuthorityResult(withHeader("Claude-Subagent-Receipt", { ...claudeReceipt, model: "other" }))).toContain("model");
+    expect(validatePlanAuthorityResult(withHeader("Claude-Subagent-Receipt", { ...claudeReceipt, model: "claude-fable-5" }))).toContain("authority contract");
+    expect(validatePlanAuthorityResult(withHeader("Claude-Subagent-Receipt", { ...claudeReceipt, model: "other" }))).toContain("authority contract");
     expect(validatePlanAuthorityResult(withHeader("Claude-Subagent-Receipt", { ...claudeReceipt, failure_class: "process" }))).toContain("failure_class null");
     expect(validatePlanAuthorityResult(withHeader("Plan-Fallback-Receipt", { ...fallbackReceipt, failure_class: "unknown" }))).toContain("allowed authority failure");
   });

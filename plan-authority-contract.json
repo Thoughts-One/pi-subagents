@@ -1,7 +1,8 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "claude_prefix": "Claude-Subagent-Receipt: ",
   "fallback_prefix": "Plan-Fallback-Receipt: ",
+  "authority_model": "claude-fable-5-1",
   "claude_receipt_keys": [
     "role",
     "model",
@@ -24,7 +25,7 @@
   ],
   "fallback_receipt_template": {
     "role": "planner",
-    "authority_model": "claude-fable-5",
+    "authority_model": "claude-fable-5-1",
     "authority_outcome": "failure",
     "failure_class": "<returned allowed failure class>",
     "author_model": "openai-codex/gpt-5.6-sol"
