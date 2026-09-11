@@ -989,6 +989,34 @@ describe("AgentManager — worktree preservation failures", () => {
     expect(completed?.status).toBe("error");
   });
 
+  it("blocks resume while a failed preservation path remains unresolved", async () => {
+    vi.mocked(createWorktree).mockReturnValueOnce({
+      path: "/tmp/pi-agent-resume-retained", branch: "pi-agent-resume-retained", baseSha: "base", workPath: "/tmp/pi-agent-resume-retained",
+    });
+    vi.mocked(cleanupWorktree).mockReturnValueOnce({
+      hasChanges: true,
+      path: "/tmp/pi-agent-resume-retained",
+      error: "commit worktree changes failed: Author identity unknown",
+    });
+    manager = new AgentManager();
+    resolvedRun();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "resume preservation", isBackground: true, isolation: "worktree",
+    });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    const resumeCalls = vi.mocked(resumeAgent).mock.calls.length;
+
+    await expect(manager.resume(id, "continue")).rejects.toThrow(
+      `Recover the unfinished work at /tmp/pi-agent-resume-retained first.`,
+    );
+    expect(vi.mocked(resumeAgent).mock.calls).toHaveLength(resumeCalls);
+    expect(record.status).toBe("error");
+    expect(record.error).toContain("Worktree preservation failed");
+    expect(record.worktreeResult?.error).toContain("Author identity unknown");
+  });
+
   it("retains an execution failure and appends the worktree recovery warning", async () => {
     vi.mocked(createWorktree).mockReturnValueOnce({
       path: "/tmp/pi-agent-preservation-failed", branch: "pi-agent-preservation-failed", baseSha: "base", workPath: "/tmp/pi-agent-preservation-failed",

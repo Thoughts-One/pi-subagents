@@ -146,6 +146,7 @@ describe("get_subagent_result after live-record eviction", () => {
       undefined,
       activeCtx,
     );
+    expect(recovered.isError).toBe(true);
     expect(textOf(recovered)).toContain("Status: error");
     expect(textOf(recovered)).toContain("Error: preservation failed");
     expect(textOf(recovered)).toContain("Partial output before the failure:\nunfinished bytes");

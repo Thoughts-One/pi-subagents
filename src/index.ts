@@ -1585,7 +1585,10 @@ Terse command-style prompts produce shallow, generic work.
         if (outcome === "invalid") {
           return textResult(`Agent result entry is invalid: "${params.agent_id}".`);
         }
-        if (outcome) return textResult(formatDurableOutcome(outcome));
+        if (outcome) {
+          const isError = outcome.status === "error" || outcome.error !== undefined;
+          return textResult(formatDurableOutcome(outcome), undefined, isError);
+        }
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up and no durable result exists in this session branch.`);
       }
 

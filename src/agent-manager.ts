@@ -731,6 +731,12 @@ export class AgentManager {
     const record = this.agents.get(id);
     if (!record?.session) return undefined;
     assertDocumentationAuditResume(record);
+    if (record.worktreeResult?.error) {
+      throw new Error(
+        `Agent "${id}" cannot be resumed because its worktree was not preserved: ${record.worktreeResult.error} ` +
+        `Recover the unfinished work at ${record.worktreeResult.path ?? record.worktree?.path ?? "the reported temporary path"} first.`,
+      );
+    }
     if (record.status === "running" || record.status === "queued" || this.activeExecutions.has(id)) {
       throw new Error(`Agent "${id}" already has an active execution.`);
     }
