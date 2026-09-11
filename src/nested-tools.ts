@@ -116,9 +116,14 @@ function ownsRecord(record: AgentRecord | undefined, parentAgentId: string): rec
  */
 type ResultPosition = "inline" | "fetched";
 
+function hasRecordFailure(record: AgentRecord): boolean {
+  return record.status === "error" || record.error !== undefined;
+}
+
 function formatRecord(record: AgentRecord, position: ResultPosition): string {
-  if (record.status === "error") {
-    return `Agent failed: ${record.error ?? "unknown error"}${partialOutputSuffix(record)}`;
+  if (hasRecordFailure(record)) {
+    const outcome = record.status === "error" ? "failed" : record.status;
+    return `Nested agent ${outcome}: ${record.error ?? "unknown error"}${partialOutputSuffix(record)}`;
   }
   if (record.status === "queued" || record.status === "running") {
     return `Agent ${record.id} is ${record.status}.`;
@@ -170,7 +175,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         }
         const resumed = await context.manager.resume(params.resume, params.prompt, signal);
         return resumed
-          ? textResult(formatRecord(resumed, "inline"), resumed.status === "error")
+          ? textResult(formatRecord(resumed, "inline"), hasRecordFailure(resumed))
           : textResult(`Failed to resume nested agent "${params.resume}".`, true);
       }
 
@@ -282,7 +287,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
           params.prompt,
           { ...options, signal },
         );
-        return textResult(formatRecord(record, "inline"), record.status === "error");
+        return textResult(formatRecord(record, "inline"), hasRecordFailure(record));
       } catch (err) {
         return textResult(err instanceof Error ? err.message : String(err), true);
       }
@@ -307,7 +312,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       if (params.wait && (record.status === "queued" || record.status === "running") && record.promise) {
         await abortable(record.promise, signal);
       }
-      return textResult(formatRecord(record, "fetched"), record.status === "error");
+      return textResult(formatRecord(record, "fetched"), hasRecordFailure(record));
     },
   });
 

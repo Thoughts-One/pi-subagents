@@ -1,8 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("node:child_process", async () => {
+  const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+  return { ...actual, execFileSync: vi.fn(actual.execFileSync) };
+});
+
 import { cleanupWorktree, createWorktree, pruneWorktrees } from "../src/worktree.js";
 
 /**
@@ -138,6 +144,45 @@ describe("worktree", () => {
 
       // Cleanup branch
       try { execFileSync("git", ["branch", "-D", result.branch!], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
+    });
+
+    it("falls back to Error.message when Git stderr is empty", () => {
+      const wt = createWorktree(repoDir, "empty-stderr")!;
+      vi.mocked(execFileSync).mockImplementationOnce(() => {
+        throw Object.assign(new Error("Git inspection timed out"), { stderr: "   " });
+      });
+
+      const result = cleanupWorktree(repoDir, wt, "inspect should fail");
+
+      expect(result).toEqual(expect.objectContaining({
+        hasChanges: true,
+        path: wt.path,
+        error: "inspect worktree changes failed: Git inspection timed out",
+      }));
+      expect(existsSync(wt.path)).toBe(true);
+
+      try { execFileSync("git", ["worktree", "remove", "--force", wt.path], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
+    });
+
+    it("retains unfinished bytes and reports commit preservation failure", () => {
+      const wt = createWorktree(repoDir, "commit-failure")!;
+      writeFileSync(join(wt.path, "unfinished.txt"), "unfinished agent bytes");
+      // Empty local identity overrides the configured test identity and makes
+      // Git reject the preservation commit without relying on host config.
+      execFileSync("git", ["config", "user.name", ""], { cwd: wt.path, stdio: "pipe" });
+      execFileSync("git", ["config", "user.email", ""], { cwd: wt.path, stdio: "pipe" });
+
+      const result = cleanupWorktree(repoDir, wt, "commit should fail");
+      expect(result).toEqual(expect.objectContaining({
+        hasChanges: true,
+        path: wt.path,
+        error: expect.stringContaining("commit worktree changes failed"),
+      }));
+      expect(result.branch).toBeUndefined();
+      expect(existsSync(wt.path)).toBe(true);
+      expect(readFileSync(join(wt.path, "unfinished.txt"))).toEqual(Buffer.from("unfinished agent bytes"));
+
+      try { execFileSync("git", ["worktree", "remove", "--force", wt.path], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
     });
 
     it("commits changes even when a pre-commit hook rejects (--no-verify)", () => {

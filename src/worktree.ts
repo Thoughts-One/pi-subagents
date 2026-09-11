@@ -35,6 +35,8 @@ export interface WorktreeCleanupResult {
   branch?: string;
   /** Worktree path if it was kept. */
   path?: string;
+  /** Why inspection or preservation failed while the worktree was retained. */
+  error?: string;
 }
 
 /**
@@ -94,8 +96,8 @@ export function cleanupWorktree(
     return { hasChanges: false };
   }
 
+  let operation = "inspect worktree changes";
   try {
-    // Check for uncommitted changes in the worktree
     const status = execFileSync("git", ["status", "--porcelain"], {
       cwd: worktree.path,
       stdio: "pipe",
@@ -103,17 +105,19 @@ export function cleanupWorktree(
     }).toString().trim();
 
     if (status) {
-      // Changes exist — stage, commit, and create a branch
+      operation = "stage worktree changes";
       execFileSync("git", ["add", "-A"], { cwd: worktree.path, stdio: "pipe", timeout: 10000 });
       // Truncate description for commit message (no shell sanitization needed — execFileSync uses argv)
       const safeDesc = agentDescription.slice(0, 200);
       const commitMsg = `pi-agent: ${safeDesc}`;
+      operation = "commit worktree changes";
       execFileSync("git", ["commit", "--no-verify", "-m", commitMsg], {
         cwd: worktree.path,
         stdio: "pipe",
         timeout: 10000,
       });
     } else {
+      operation = "inspect worktree HEAD";
       const currentSha = execFileSync("git", ["rev-parse", "HEAD"], {
         cwd: worktree.path,
         stdio: "pipe",
@@ -130,6 +134,7 @@ export function cleanupWorktree(
     // Create a branch pointing to the worktree's HEAD.
     // If the branch already exists, append a suffix to avoid overwriting previous work.
     let branchName = worktree.branch;
+    operation = "create preservation branch";
     try {
       execFileSync("git", ["branch", branchName], {
         cwd: worktree.path,
@@ -139,6 +144,7 @@ export function cleanupWorktree(
     } catch {
       // Branch already exists — use a unique suffix
       branchName = `${worktree.branch}-${Date.now()}`;
+      operation = "create unique preservation branch";
       execFileSync("git", ["branch", branchName], {
         cwd: worktree.path,
         stdio: "pipe",
@@ -156,10 +162,21 @@ export function cleanupWorktree(
       branch: worktree.branch,
       path: worktree.path,
     };
-  } catch {
-    // Best effort cleanup on error
-    try { removeWorktree(cwd, worktree.path); } catch { /* ignore */ }
-    return { hasChanges: false };
+  } catch (error) {
+    const stderr = error !== null && typeof error === "object" && "stderr" in error
+      ? error.stderr
+      : undefined;
+    const stderrText = typeof stderr === "string"
+      ? stderr.trim()
+      : Buffer.isBuffer(stderr)
+        ? stderr.toString().trim()
+        : "";
+    const gitError = stderrText || (error instanceof Error ? error.message : String(error));
+    return {
+      hasChanges: true,
+      path: worktree.path,
+      error: `${operation} failed: ${gitError}`,
+    };
   }
 }
 

@@ -8,8 +8,14 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn() };
 });
 
+vi.mock("../src/worktree.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/worktree.js")>("../src/worktree.js");
+  return { ...actual, cleanupWorktree: vi.fn(), createWorktree: vi.fn() };
+});
+
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
+import { cleanupWorktree, createWorktree } from "../src/worktree.js";
 
 function makePi() {
   const tools = new Map<string, any>();
@@ -181,6 +187,38 @@ describe("audit_documents", () => {
     );
     expect(vi.mocked(runAgent).mock.calls[0][2]).toContain("MANIFEST:\n- ");
     expect(vi.mocked(runAgent).mock.calls[0][2]).toContain("guide.md");
+    await lifecycle.get("session_shutdown")?.();
+  });
+
+  it("returns stopped preservation failures with labeled partial output", async () => {
+    writeFileSync(
+      join(root, ".pi", "agents", "documentation-auditor.md"),
+      "---\ndescription: Documentation Auditor\ntools: read\nextensions: false\nskills: false\nisolation: worktree\n---\nAudit.",
+    );
+    vi.mocked(createWorktree).mockReturnValueOnce({
+      path: "/tmp/pi-agent-audit-retained", branch: "pi-agent-audit-retained", baseSha: "base", workPath: "/tmp/pi-agent-audit-retained",
+    });
+    vi.mocked(cleanupWorktree).mockReturnValueOnce({
+      hasChanges: true,
+      path: "/tmp/pi-agent-audit-retained",
+      error: "commit worktree changes failed: Author identity unknown",
+    });
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "OUTCOME: INCOMPLETE\nPartial audit.",
+      session: { dispose: vi.fn() } as any,
+      aborted: true,
+      steered: false,
+    });
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+
+    const result = await tools.get("audit_documents").execute("call", validRequest(), undefined, undefined, context(root));
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Documentation audit aborted:");
+    expect(textOf(result)).toContain("Worktree preservation failed");
+    expect(textOf(result)).toContain("/tmp/pi-agent-audit-retained");
+    expect(textOf(result)).toContain("Partial output before the failure:\nOUTCOME: INCOMPLETE\nPartial audit.");
     await lifecycle.get("session_shutdown")?.();
   });
 

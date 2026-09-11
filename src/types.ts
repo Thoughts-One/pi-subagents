@@ -5,6 +5,7 @@
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { LifetimeUsage, UsageModelIdentity } from "./usage.js";
+import type { WorktreeCleanupResult } from "./worktree.js";
 
 export type { ThinkingLevel };
 
@@ -146,7 +147,7 @@ export interface AgentRecord {
   /** Worktree info if the agent is running in an isolated worktree. */
   worktree?: { path: string; branch: string; baseSha: string; workPath: string };
   /** Worktree cleanup result after agent completion. */
-  worktreeResult?: { hasChanges: boolean; branch?: string };
+  worktreeResult?: WorktreeCleanupResult;
   /** The tool_use_id from the original Agent tool call. */
   toolCallId?: string;
   /** Persisted Pi session file for this child, when session persistence is enabled. */

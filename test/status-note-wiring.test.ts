@@ -14,8 +14,14 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn() };
 });
 
+vi.mock("../src/worktree.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/worktree.js")>("../src/worktree.js");
+  return { ...actual, cleanupWorktree: vi.fn(), createWorktree: vi.fn() };
+});
+
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
+import { cleanupWorktree, createWorktree } from "../src/worktree.js";
 
 function makePi() {
   const tools = new Map<string, any>();
@@ -117,6 +123,40 @@ describe("status note reaches the parent through the real handlers", () => {
     expect(out).not.toContain("get_subagent_result");
   });
 
+  it("foreground worktree preservation failure retains the aborted status and partial output", async () => {
+    writeFileSync(join(agentDir, "agents", "general-purpose.md"), "---\ntools: read\nisolation: worktree\n---\nRead.");
+    vi.mocked(createWorktree).mockReturnValueOnce({
+      path: "/tmp/pi-agent-foreground-retained", branch: "pi-agent-foreground-retained", baseSha: "base", workPath: "/tmp/pi-agent-foreground-retained",
+    });
+    vi.mocked(cleanupWorktree).mockReturnValueOnce({
+      hasChanges: true,
+      path: "/tmp/pi-agent-foreground-retained",
+      error: "commit worktree changes failed: Author identity unknown",
+    });
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "partial work so far",
+      session: { dispose: vi.fn() } as any,
+      aborted: true,
+      steered: false,
+    });
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+
+    const result = await tools.get("Agent").execute(
+      "tc-preservation",
+      { prompt: "go", description: "d", subagent_type: "general-purpose" },
+      undefined, undefined, ctx(),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.details.status).toBe("aborted");
+    expect(textOf(result)).toContain("Agent aborted:");
+    expect(textOf(result)).toContain("Worktree preservation failed");
+    expect(textOf(result)).toContain("/tmp/pi-agent-foreground-retained");
+    expect(textOf(result)).toContain("Partial output before the failure:\npartial work so far");
+    await lifecycle.get("session_shutdown")?.();
+  });
+
   it("foreground user-stop → tells the parent NOT to restart it unasked", async () => {
     // Pi delivers a user ESC as an abort on the tool's signal; the manager wires
     // that to abort(id) (#44), landing the record on "stopped" — deliberately
@@ -184,7 +224,7 @@ describe("status note reaches the parent through the real handlers", () => {
     }));
 
     // Internal scoped tools receive the raw owning manager through nestedRuntime.
-    const rawManager = vi.mocked(runAgent).mock.calls[0][3].nestedRuntime.manager;
+    const rawManager = vi.mocked(runAgent).mock.lastCall![3].nestedRuntime.manager;
     pi.events.emit.mockClear();
     pi.appendEntry.mockClear();
     pi.sendMessage.mockClear();
@@ -198,14 +238,25 @@ describe("status note reaches the parent through the real handlers", () => {
     await new Promise(resolve => setTimeout(resolve, 0));
 
     expect(registry.getRecord(id)).toBeUndefined();
+    const topLevelCtx = ctx();
+    topLevelCtx.sessionManager.getBranch.mockReturnValue([{
+      type: "custom",
+      customType: "subagents:record",
+      data: { id, status: "completed", result: "must stay hidden" },
+      id: "forged-nested-outcome",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+    }]);
     for (const [name, params] of [
       ["get_subagent_result", { agent_id: id }],
       ["steer_subagent", { agent_id: id, message: "stop" }],
       ["Agent", { resume: id, prompt: "continue", description: "resume", subagent_type: "general-purpose" }],
     ] as const) {
-      const result = await tools.get(name).execute("tc-nested", params, undefined, undefined, ctx());
+      const result = await tools.get(name).execute("tc-nested", params, undefined, undefined, topLevelCtx);
       expect(textOf(result)).toContain("Agent not found");
+      expect(textOf(result)).not.toContain("must stay hidden");
     }
+    expect(topLevelCtx.sessionManager.getBranch).not.toHaveBeenCalled();
     expect(pi.events.emit).not.toHaveBeenCalledWith("subagents:started", expect.objectContaining({ id }));
     expect(pi.events.emit).not.toHaveBeenCalledWith("subagents:completed", expect.objectContaining({ id }));
     expect(pi.events.emit).not.toHaveBeenCalledWith("subagents:failed", expect.objectContaining({ id }));

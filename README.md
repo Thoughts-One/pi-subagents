@@ -336,6 +336,8 @@ Check status and retrieve results from a background agent.
 
 Cancelling a `wait: true` call (for example, with `Esc`) stops only the wait. The background agent keeps running, and its completion notification still arrives normally.
 
+Terminal results remain retrievable from the active session branch after the live record is evicted, including after session resume or compaction. Retrieval never searches sibling branches.
+
 ### `steer_subagent`
 
 Send a steering message to a running agent. The message interrupts after the current tool execution.
@@ -606,6 +608,8 @@ The agent gets a full, isolated copy of the repository. On completion:
 - **Agent committed its own work:** the branch is created at the agent's HEAD, preserving its commits (uncommitted leftovers are committed on top first)
 
 The automatic preservation commit uses `--no-verify`, so local pre-commit hooks can't block it — the commit is local-only and never pushed, and pre-push/server-side hooks still apply.
+
+If worktree inspection or preservation fails, the temporary worktree is retained. The result reports its path and the Git failure. The OS can clean up temporary directories, so inspect or copy the retained worktree promptly.
 
 If the worktree cannot be created (not a git repo, no commits, or `git worktree add` fails), the `Agent` tool returns a clear error instead of running unisolated. `isolation: "worktree"` is a strict role guarantee. Initialize git and commit at least once, or remove the role field.
 

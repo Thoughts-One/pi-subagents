@@ -280,6 +280,40 @@ export class AgentManager {
     this.drainQueue();
   }
 
+  /** Preserve worktree-cleanup failures on the terminal record without discarding child output. */
+  private cleanupAgentWorktree(
+    record: AgentRecord,
+    baseCwd: string,
+    description: string,
+    customCwd: string | undefined,
+  ): void {
+    if (!record.worktree) return;
+    const wtResult = cleanupWorktree(baseCwd, record.worktree, description);
+    record.worktreeResult = wtResult;
+
+    if (wtResult.error) {
+      const recoveryPath = wtResult.path ?? record.worktree.path;
+      const preservationError =
+        `Worktree preservation failed: ${wtResult.error} ` +
+        `Unfinished work remains at ${recoveryPath}. This path is under the OS temporary directory and subject to system cleanup.`;
+      if (record.status === "error" || record.status === "stopped" || record.status === "aborted") {
+        record.error = `${record.error ?? `Agent ${record.status}.`}\n\n${preservationError}`;
+      } else {
+        record.status = "error";
+        record.error = preservationError;
+      }
+      return;
+    }
+
+    if (wtResult.hasChanges && wtResult.branch) {
+      // With a caller-supplied cwd the branch lives in THAT repo, not the
+      // parent session's — say so, or the orchestrator merges in the wrong repo.
+      const repoNote = customCwd !== undefined ? ` in \`${baseCwd}\`` : "";
+      record.result = (record.result ?? "") +
+        `\n\n---\nChanges saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git merge ${wtResult.branch}\`${customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : ""}`;
+    }
+  }
+
   /** Add usage to its owning record and every visible ancestor. */
   private accumulateUsage(record: AgentRecord, event: AttributedUsageEvent): void {
     for (let current: AgentRecord | undefined = record; current !== undefined; ) {
@@ -530,18 +564,7 @@ export class AgentManager {
 
         detach();
 
-        // Clean up worktree if used
-        if (record.worktree) {
-          const wtResult = cleanupWorktree(baseCwd, record.worktree, options.description);
-          record.worktreeResult = wtResult;
-          if (wtResult.hasChanges && wtResult.branch) {
-            // With a caller-supplied cwd the branch lives in THAT repo, not the
-            // parent session's — say so, or the orchestrator merges in the wrong repo.
-            const repoNote = customCwd !== undefined ? ` in \`${baseCwd}\`` : "";
-            record.result = (record.result ?? "") +
-              `\n\n---\nChanges saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git merge ${wtResult.branch}\`${customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : ""}`;
-          }
-        }
+        this.cleanupAgentWorktree(record, baseCwd, options.description, customCwd);
 
         this.abortOwnedChildren(id);
 
@@ -562,13 +585,7 @@ export class AgentManager {
 
         detach();
 
-        // Best-effort worktree cleanup on error
-        if (record.worktree) {
-          try {
-            const wtResult = cleanupWorktree(baseCwd, record.worktree, options.description);
-            record.worktreeResult = wtResult;
-          } catch { /* ignore cleanup errors */ }
-        }
+        this.cleanupAgentWorktree(record, baseCwd, options.description, customCwd);
 
         this.abortOwnedChildren(id);
 

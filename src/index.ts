@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { abortable } from "./abortable.js";
@@ -57,8 +57,21 @@ import { type AttributedUsageEvent, addUsage, createLifetimeUsage, getLifetimeCo
 // ---- Shared helpers ----
 
 /** Tool execute return value for a text response. */
-function textResult(msg: string, details?: AgentDetails) {
-  return { content: [{ type: "text" as const, text: msg }], details: details as any };
+function textResult(msg: string, details?: AgentDetails, isError = false) {
+  return {
+    content: [{ type: "text" as const, text: msg }],
+    details: details as any,
+    ...(isError ? { isError: true } : {}),
+  };
+}
+
+function hasRecordFailure(record: Pick<AgentRecord, "status" | "error">): boolean {
+  return record.status === "error" || record.error !== undefined;
+}
+
+function formatRecordFailure(subject: string, record: AgentRecord): string {
+  const outcome = record.status === "error" ? `${subject} failed` : `${subject} ${record.status}`;
+  return `${outcome}: ${record.error ?? "unknown error"}${partialOutputSuffix(record)}`;
 }
 
 export function renderRunningAgentStatus(
@@ -139,11 +152,66 @@ const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "ma
 function getStatusLabel(status: string, error?: string): string {
   switch (status) {
     case "error": return `Error: ${error ?? "unknown"}`;
-    case "aborted": return "Aborted (max turns exceeded)";
+    case "aborted": return error ? `Aborted (max turns exceeded): ${error}` : "Aborted (max turns exceeded)";
     case "steered": return "Wrapped up (turn limit)";
-    case "stopped": return "Stopped";
+    case "stopped": return error ? `Stopped: ${error}` : "Stopped";
     default: return "Done";
   }
+}
+
+type TerminalStatus = "completed" | "steered" | "aborted" | "stopped" | "error";
+
+interface DurableAgentOutcome {
+  id: string;
+  status: TerminalStatus;
+  result?: string;
+  error?: string;
+}
+
+function isTerminalStatus(status: unknown): status is TerminalStatus {
+  return status === "completed" || status === "steered" || status === "aborted" || status === "stopped" || status === "error";
+}
+
+/** Find the latest matching outcome on the active session branch. */
+function findDurableOutcome(entries: readonly SessionEntry[], agentId: string): DurableAgentOutcome | "invalid" | undefined {
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (entry.type !== "custom" || entry.customType !== "subagents:record") continue;
+    const data = entry.data;
+    if (data === null || typeof data !== "object" || Array.isArray(data)) continue;
+    const candidate = data as Record<string, unknown>;
+    if (candidate.id !== agentId) continue;
+    if (
+      typeof candidate.id !== "string"
+      || !isTerminalStatus(candidate.status)
+      || (candidate.result !== undefined && typeof candidate.result !== "string")
+      || (candidate.error !== undefined && typeof candidate.error !== "string")
+      || ((candidate.status === "completed" || candidate.status === "steered") && candidate.error !== undefined)
+      || (candidate.status === "error" && typeof candidate.error !== "string")
+    ) {
+      return "invalid";
+    }
+    return {
+      id: candidate.id,
+      status: candidate.status,
+      result: candidate.result,
+      error: candidate.error,
+    };
+  }
+  return undefined;
+}
+
+/** Render the fields carried by a durable outcome, without recreating a live record. */
+function formatDurableOutcome(outcome: DurableAgentOutcome): string {
+  const output = `Agent: ${outcome.id}\nStatus: ${outcome.status}${getStatusNote(outcome.status)}\n\n`;
+  if (outcome.status === "error" || outcome.error !== undefined) {
+    const error = outcome.error === undefined ? "" : `Error: ${outcome.error}`;
+    const partial = outcome.result?.trim()
+      ? `Partial output before the failure:\n${outcome.result}`
+      : "";
+    return output + [error, partial].filter(Boolean).join("\n\n");
+  }
+  return output + (outcome.result?.trim() || "No output.");
 }
 
 /** Escape XML special characters to prevent injection in structured notifications. */
@@ -931,8 +999,8 @@ export default function (pi: ExtensionAPI) {
           );
           return textResult(`Documentation audit started in background.\nAgent ID: ${started.id}`);
         }
-        if (started.record.status === "error") {
-          return textResult(`Documentation audit failed: ${started.record.error}${partialOutputSuffix(started.record)}`);
+        if (hasRecordFailure(started.record)) {
+          return textResult(formatRecordFailure("Documentation audit", started.record), undefined, true);
         }
         return textResult(started.record.result?.trim() || "No output.");
       } catch (err) {
@@ -1182,6 +1250,7 @@ Terse command-style prompts produce shallow, generic work.
         const s = stats(details);
         let line = theme.fg("dim", "■") + (s ? " " + s : "");
         line += "\n" + theme.fg("dim", "  ⎿  Stopped");
+        if (details.error) line += "\n" + theme.fg("error", `  ⎿  Error: ${details.error}`);
         return new Text(line, 0, 0);
       }
 
@@ -1193,6 +1262,7 @@ Terse command-style prompts produce shallow, generic work.
         line += "\n" + theme.fg("error", `  ⎿  Error: ${details.error ?? "unknown"}`);
       } else {
         line += "\n" + theme.fg("warning", "  ⎿  Aborted (max turns exceeded)");
+        if (details.error) line += "\n" + theme.fg("error", `  ⎿  Error: ${details.error}`);
       }
 
       return new Text(line, 0, 0);
@@ -1336,8 +1406,8 @@ Terse command-style prompts produce shallow, generic work.
         }
         // A failed resume surfaces the error, plus any partial output THIS
         // resume produced (never the previous turn's answer, #144).
-        if (record.status === "error") {
-          return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(detailBase, record));
+        if (hasRecordFailure(record)) {
+          return textResult(formatRecordFailure("Agent", record), buildDetails(detailBase, record), true);
         }
         return textResult(
           record.result?.trim() || "No output.",
@@ -1467,9 +1537,9 @@ Terse command-style prompts produce shallow, generic work.
 
       const details = buildDetails(detailBase, record, fgState, { tokens: tokenText });
 
-      if (record.status === "error") {
+      if (hasRecordFailure(record)) {
         // Error headline + any partial output the run produced before failing.
-        return textResult(`${fallbackNote}Agent failed: ${record.error}${partialOutputSuffix(record)}`, details);
+        return textResult(`${fallbackNote}${formatRecordFailure("Agent", record)}`, details, true);
       }
 
       const durationMs = (record.completedAt ?? Date.now()) - record.startedAt;
@@ -1502,10 +1572,21 @@ Terse command-style prompts produce shallow, generic work.
         }),
       ),
     }),
-    execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
+    execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
       const record = manager.getRecord(params.agent_id);
-      if (!record || record.parentAgentId) {
-        return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
+      if (record?.parentAgentId) {
+        return textResult(`Agent not found: "${params.agent_id}". Nested agents remain visible only to their parent.`);
+      }
+      if (!record) {
+        // A live record is the authority while it exists. Only after a root
+        // record has been evicted do we inspect the active branch's durable
+        // outcome entries; this does not recreate the record or its session.
+        const outcome = findDurableOutcome(ctx.sessionManager.getBranch(), params.agent_id);
+        if (outcome === "invalid") {
+          return textResult(`Agent result entry is invalid: "${params.agent_id}".`);
+        }
+        if (outcome) return textResult(formatDurableOutcome(outcome));
+        return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up and no durable result exists in this session branch.`);
       }
 
       // Wait for completion if requested. Cancellation stops only this tool
@@ -1535,7 +1616,7 @@ Terse command-style prompts produce shallow, generic work.
 
       if (record.status === "running") {
         output += "Agent is still running. Use wait: true or check back later.";
-      } else if (record.status === "error") {
+      } else if (hasRecordFailure(record)) {
         output += `Error: ${record.error}${partialOutputSuffix(record)}`;
       } else {
         output += record.result?.trim() || "No output.";
@@ -1547,7 +1628,7 @@ Terse command-style prompts produce shallow, generic work.
         cancelNudge(params.agent_id);
       }
 
-      return textResult(output);
+      return textResult(output, undefined, hasRecordFailure(record));
     },
   }));
 

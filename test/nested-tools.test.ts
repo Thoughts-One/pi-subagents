@@ -434,6 +434,47 @@ describe("child-safe nested Agent tools", () => {
     expect(result.content[0].text).toContain("got this far");
   });
 
+  it("returns an aborted preservation failure with labeled partial output when fetched", async () => {
+    records.set("child-1", {
+      id: "child-1",
+      status: "aborted",
+      error: "Worktree preservation failed: commit failed. Unfinished work remains at /tmp/child-retained.",
+      result: "partial work",
+      parentAgentId: "parent-1",
+    });
+    const [, getResult] = tools();
+    const result = await execute(getResult, { agent_id: "child-1" });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("Nested agent aborted:");
+    expect(result.content[0].text).toContain("/tmp/child-retained");
+    expect(result.content[0].text).toContain("Partial output before the failure:\npartial work");
+  });
+
+  it("returns a stopped preservation failure with labeled partial output inline", async () => {
+    spawnAndWait.mockImplementation(async () => ({
+      id: "child-1",
+      record: {
+        id: "child-1",
+        status: "stopped",
+        error: "Worktree preservation failed: commit failed. Unfinished work remains at /tmp/child-retained.",
+        result: "got this far",
+        parentAgentId: "parent-1",
+      },
+    }));
+    const [agent] = tools();
+    const result = await execute(agent, {
+      subagent_type: "scout",
+      description: "failing",
+      prompt: "Do work",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("Nested agent stopped:");
+    expect(result.content[0].text).toContain("/tmp/child-retained");
+    expect(result.content[0].text).toContain("Partial output before the failure:\ngot this far");
+  });
+
   it("forwards the execution context to the manager unmodified", async () => {
     // Each AgentSession builds its own ExtensionRunner, so the ctx handed to
     // execute is the CHILD's — capturing one at tool-build time instead would

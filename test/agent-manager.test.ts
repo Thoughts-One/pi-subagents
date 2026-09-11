@@ -8,6 +8,7 @@ import { registerAgents } from "../src/agent-types.js";
 import { prepareDocumentationAudit } from "../src/documentation-audit.js";
 import type { AgentRecord } from "../src/types.js";
 import { getLifetimeComponents } from "../src/usage.js";
+import { cleanupWorktree, createWorktree } from "../src/worktree.js";
 import { planAuthorityModel } from "./plan-authority-fixture.js";
 
 vi.mock("../src/agent-runner.js", () => ({
@@ -953,6 +954,63 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
     expect(manager.listAgents()).toEqual([]);
     // runAgent never invoked — strict, no silent fallback
     expect(runAgent).not.toHaveBeenCalled();
+  });
+});
+
+describe("AgentManager — worktree preservation failures", () => {
+  let manager: AgentManager;
+
+  afterEach(() => manager?.dispose());
+
+  it("turns an otherwise completed execution into error while retaining its result", async () => {
+    vi.mocked(createWorktree).mockReturnValueOnce({
+      path: "/tmp/pi-agent-preservation", branch: "pi-agent-preservation", baseSha: "base", workPath: "/tmp/pi-agent-preservation",
+    });
+    vi.mocked(cleanupWorktree).mockReturnValueOnce({
+      hasChanges: true,
+      path: "/tmp/pi-agent-preservation",
+      error: "commit worktree changes failed: Author identity unknown",
+    });
+    let completed: AgentRecord | undefined;
+    manager = new AgentManager((record) => { completed = record; });
+    resolvedRun();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "preservation", isBackground: true, isolation: "worktree",
+    });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    expect(record).toEqual(expect.objectContaining({ status: "error", result: "done" }));
+    expect(record.error).toContain("Worktree preservation failed: commit worktree changes failed");
+    expect(record.error).toContain("/tmp/pi-agent-preservation");
+    expect(record.error).toContain("OS temporary directory and subject to system cleanup");
+    expect(completed).toBe(record);
+    expect(completed?.status).toBe("error");
+  });
+
+  it("retains an execution failure and appends the worktree recovery warning", async () => {
+    vi.mocked(createWorktree).mockReturnValueOnce({
+      path: "/tmp/pi-agent-preservation-failed", branch: "pi-agent-preservation-failed", baseSha: "base", workPath: "/tmp/pi-agent-preservation-failed",
+    });
+    vi.mocked(cleanupWorktree).mockReturnValueOnce({
+      hasChanges: true,
+      path: "/tmp/pi-agent-preservation-failed",
+      error: "commit worktree changes failed: Author identity unknown",
+    });
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockRejectedValueOnce(new Error("runner failed first"));
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "failed preservation", isBackground: true, isolation: "worktree",
+    });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    expect(record.status).toBe("error");
+    expect(record.error).toContain("runner failed first");
+    expect(record.error).toContain("Worktree preservation failed: commit worktree changes failed");
+    expect(record.error).toContain("/tmp/pi-agent-preservation-failed");
   });
 });
 
