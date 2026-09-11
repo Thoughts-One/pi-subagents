@@ -803,6 +803,10 @@ export class AgentManager {
     return this.agents.get(id);
   }
 
+  isExecutionActive(id: string): boolean {
+    return this.activeExecutions.has(id);
+  }
+
   listAgents(): AgentRecord[] {
     return [...this.agents.values()].sort(
       (a, b) => b.startedAt - a.startedAt,

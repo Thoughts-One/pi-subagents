@@ -28,16 +28,28 @@ export interface WorktreeInfo {
   workPath: string;
 }
 
-export interface WorktreeCleanupResult {
-  /** Whether changes were found in the worktree. */
-  hasChanges: boolean;
-  /** Branch name if changes were committed. */
-  branch?: string;
-  /** Worktree path if it was kept. */
-  path?: string;
-  /** Why inspection or preservation failed while the worktree was retained. */
-  error?: string;
-}
+export type WorktreeCleanupResult =
+  | {
+    hasChanges: false;
+    branch?: never;
+    path?: never;
+    error?: never;
+  }
+  | {
+    hasChanges: true;
+    /** Branch containing the preserved changes. */
+    branch: string;
+    path: string;
+    error?: never;
+  }
+  | {
+    hasChanges: true;
+    branch?: never;
+    /** Retained worktree path containing the unfinished changes. */
+    path: string;
+    /** Why inspection or preservation failed. */
+    error: string;
+  };
 
 /**
  * Create a temporary git worktree for an agent.

@@ -26,18 +26,25 @@ const branch: any[] = [];
 function makePi() {
   const tools = new Map<string, any>();
   const lifecycle = new Map<string, any>();
+  const eventHandlers = new Map<string, any>();
   const pi = {
     registerMessageRenderer: vi.fn(),
     registerTool: vi.fn((t: any) => tools.set(t.name, t)),
     registerCommand: vi.fn(),
     on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),
-    events: { emit: vi.fn(), on: vi.fn(() => vi.fn()) },
+    events: {
+      emit: vi.fn(),
+      on: vi.fn((event: string, handler: any) => {
+        eventHandlers.set(event, handler);
+        return vi.fn();
+      }),
+    },
     appendEntry: vi.fn((customType: string, data: unknown) => {
       branch.push({ type: "custom", customType, data, id: `e${branch.length}`, parentId: null, timestamp: new Date().toISOString() });
     }),
     sendMessage: vi.fn(),
   } as any;
-  return { pi, tools, lifecycle };
+  return { pi, tools, lifecycle, eventHandlers };
 }
 
 function ctx() {
@@ -260,6 +267,65 @@ describe("get_subagent_result after live-record eviction", () => {
       expect(textOf(result)).toContain("Agent result entry is invalid");
       expect(textOf(result)).not.toContain("older success");
     }
+
+    await lifecycle.get("session_shutdown")?.();
+  });
+
+  it("keeps a stopped result unconsumed until worktree preservation settles", async () => {
+    writeFileSync(
+      join(agentDir, "agents", "general-purpose.md"),
+      "---\ntools: read\nisolation: worktree\n---\nRead.",
+    );
+    vi.mocked(createWorktree).mockReturnValueOnce({
+      path: "/tmp/pi-agent-stopping", branch: "pi-agent-stopping", baseSha: "base", workPath: "/tmp/pi-agent-stopping",
+    });
+    let finishRun: ((value: any) => void) | undefined;
+    vi.mocked(runAgent).mockImplementationOnce(() => new Promise((resolve) => { finishRun = resolve; }));
+    const { pi, tools, lifecycle, eventHandlers } = makePi();
+    subagentsExtension(pi);
+    const bindCtx = ctx();
+    bindCtx.sessionManager.getSessionId.mockReturnValue(undefined);
+    await lifecycle.get("session_start")?.({}, bindCtx);
+
+    const spawned = await tools.get("Agent").execute(
+      "tc-stopping-spawn",
+      { prompt: "go", description: "stop before cleanup", subagent_type: "general-purpose", run_in_background: true },
+      undefined, undefined, ctx(),
+    );
+    const id = /Agent ID: (\S+)/.exec(textOf(spawned))![1];
+    eventHandlers.get("subagents:rpc:stop")?.({ requestId: "stop-before-cleanup", agentId: id });
+
+    const stopping = await tools.get("get_subagent_result").execute(
+      "tc-stopping-read",
+      { agent_id: id },
+      undefined,
+      undefined,
+      ctx(),
+    );
+    expect(textOf(stopping)).toContain("Agent is stopping. Worktree preservation is still pending");
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+
+    vi.mocked(cleanupWorktree).mockReturnValueOnce({
+      hasChanges: true,
+      path: "/tmp/pi-agent-stopping",
+      error: "commit worktree changes failed: Author identity unknown",
+    });
+    finishRun?.({
+      responseText: "STOPPED-PARTIAL-OUTPUT",
+      session: { dispose: vi.fn() },
+      aborted: false,
+      steered: false,
+    });
+    await flush();
+    await new Promise((resolve) => setTimeout(resolve, 350));
+
+    expect(pi.sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      details: expect.objectContaining({
+        status: "stopped",
+        error: expect.stringContaining("/tmp/pi-agent-stopping"),
+        resultPreview: "STOPPED-PARTIAL-OUTPUT",
+      }),
+    }), expect.anything());
 
     await lifecycle.get("session_shutdown")?.();
   });

@@ -334,7 +334,7 @@ Check status and retrieve results from a background agent.
 | `agent_id` | string | yes | Agent ID to check |
 | `wait` | boolean | no | Wait for completion |
 
-Cancelling a `wait: true` call (for example, with `Esc`) stops only the wait. The background agent keeps running, and its completion notification still arrives normally.
+Cancelling a `wait: true` call (for example, with `Esc`) stops only the wait. The background agent keeps running, and its completion notification still arrives normally. If a stopped agent is still preserving its worktree, a non-waiting read reports that pending state without consuming the later completion notification.
 
 Terminal results remain retrievable from the active session branch after the live record is evicted, including after session resume or compaction. Retrieval never searches sibling branches.
 

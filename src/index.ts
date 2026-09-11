@@ -1595,8 +1595,13 @@ Terse command-style prompts produce shallow, generic work.
       // Wait for completion if requested. Cancellation stops only this tool
       // call; the background agent keeps running and remains unconsumed so its
       // completion notification can still be delivered. The record promise is
-      // created before queue admission, so one await covers queued and running.
-      if (params.wait && (record.status === "running" || record.status === "queued") && record.promise) {
+      // created before queue admission, so one await covers queued, running,
+      // and a stopped execution whose runner is still preserving its worktree.
+      if (
+        params.wait
+        && record.promise
+        && (record.status === "running" || record.status === "queued" || manager.isExecutionActive(record.id))
+      ) {
         await abortable(record.promise, signal);
       }
 
@@ -1619,14 +1624,17 @@ Terse command-style prompts produce shallow, generic work.
 
       if (record.status === "running") {
         output += "Agent is still running. Use wait: true or check back later.";
+      } else if (record.status === "stopped" && manager.isExecutionActive(record.id)) {
+        output += "Agent is stopping. Worktree preservation is still pending; use wait: true or check back later.";
       } else if (hasRecordFailure(record)) {
         output += `Error: ${record.error}${partialOutputSuffix(record)}`;
       } else {
         output += record.result?.trim() || "No output.";
       }
 
-      // Mark result as consumed — suppresses the completion notification
-      if (record.status !== "running" && record.status !== "queued") {
+      // Suppress the completion notification only after the execution and any
+      // worktree preservation have settled. A stop request is not completion.
+      if (!manager.isExecutionActive(record.id) && record.status !== "running" && record.status !== "queued") {
         record.resultConsumed = true;
         cancelNudge(params.agent_id);
       }
