@@ -609,7 +609,7 @@ The agent gets a full, isolated copy of the repository. On completion:
 
 The automatic preservation commit uses `--no-verify`, so local pre-commit hooks can't block it — the commit is local-only and never pushed, and pre-push/server-side hooks still apply.
 
-If worktree inspection or preservation fails, the temporary worktree is retained. The result reports its path and the Git failure. The failed agent cannot be resumed while that preservation failure remains recorded. The OS can clean up temporary directories, so inspect or copy the retained worktree promptly.
+If worktree inspection or preservation fails, the temporary worktree is retained. The result reports its path and the Git failure. A stopped execution remains active for manager-level running and wait checks until preservation settles. The failed agent cannot be resumed while that preservation failure remains recorded. The OS can clean up temporary directories, so inspect or copy the retained worktree promptly.
 
 If the worktree cannot be created (not a git repo, no commits, or `git worktree add` fails), the `Agent` tool returns a clear error instead of running unisolated. `isolation: "worktree"` is a strict role guarantee. Initialize git and commit at least once, or remove the role field.
 

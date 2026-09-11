@@ -737,7 +737,7 @@ export class AgentManager {
         `Recover the unfinished work at ${record.worktreeResult.path ?? record.worktree?.path ?? "the reported temporary path"} first.`,
       );
     }
-    if (record.status === "running" || record.status === "queued" || this.activeExecutions.has(id)) {
+    if (this.isRecordActive(record)) {
       throw new Error(`Agent "${id}" already has an active execution.`);
     }
     const activeWriter = record.isWriteClass ? this.writerOwner(record.parentAgentId) : undefined;
@@ -803,6 +803,10 @@ export class AgentManager {
     return this.agents.get(id);
   }
 
+  private isRecordActive(record: AgentRecord): boolean {
+    return record.status === "running" || record.status === "queued" || this.activeExecutions.has(record.id);
+  }
+
   isExecutionActive(id: string): boolean {
     return this.activeExecutions.has(id);
   }
@@ -845,7 +849,7 @@ export class AgentManager {
   private cleanup() {
     const cutoff = Date.now() - 10 * 60_000;
     for (const [id, record] of this.agents) {
-      if (record.status === "running" || record.status === "queued" || this.activeExecutions.has(id)) continue;
+      if (this.isRecordActive(record)) continue;
       if ((record.completedAt ?? 0) >= cutoff) continue;
       this.removeRecord(id, record);
     }
@@ -859,17 +863,15 @@ export class AgentManager {
    */
   clearCompleted(skipUnconsumed = false): void {
     for (const [id, record] of this.agents) {
-      if (record.status === "running" || record.status === "queued" || this.activeExecutions.has(id)) continue;
+      if (this.isRecordActive(record)) continue;
       if (skipUnconsumed && !record.resultConsumed) continue;
       this.removeRecord(id, record);
     }
   }
 
-  /** Whether any agents are still running or queued. */
+  /** Whether any agents are queued or have an execution that has not settled. */
   hasRunning(): boolean {
-    return [...this.agents.values()].some(
-      (record) => record.status === "running" || record.status === "queued",
-    );
+    return [...this.agents.values()].some((record) => this.isRecordActive(record));
   }
 
   /** Abort all running and queued agents immediately. */
@@ -900,14 +902,14 @@ export class AgentManager {
     return count;
   }
 
-  /** Wait for all running and queued agents to complete (including queued ones). */
+  /** Wait for all queued and unsettled agent executions. */
   async waitForAll(): Promise<void> {
     // Loop because drainQueue respects the concurrency limit — as running
     // agents finish they start queued ones, which need awaiting too.
     while (true) {
       this.drainQueue();
       const pending = [...this.agents.values()]
-        .filter((record) => record.status === "running" || record.status === "queued")
+        .filter((record) => this.isRecordActive(record))
         .map(r => r.promise)
         .filter(Boolean);
       if (pending.length === 0) break;

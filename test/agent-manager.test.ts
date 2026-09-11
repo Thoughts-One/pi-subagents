@@ -1396,7 +1396,7 @@ describe("AgentManager — abortAll", () => {
     expect(manager.abortAll()).toBe(2);
     expect(manager.getRecord(running)?.status).toBe("stopped");
     expect(manager.getRecord(queued)?.status).toBe("stopped");
-    expect(manager.hasRunning()).toBe(false);
+    expect(manager.hasRunning()).toBe(true);
   });
 
   it("returns 0 when there are no running or queued agents", () => {
@@ -1421,6 +1421,30 @@ describe("AgentManager — hasRunning", () => {
     expect(manager.hasRunning()).toBe(true);
 
     await manager.getRecord(id)?.promise;
+    expect(manager.hasRunning()).toBe(false);
+  });
+
+  it("reports and waits for a stopped execution until it settles", async () => {
+    manager = new AgentManager();
+    let finish!: (value: Awaited<ReturnType<typeof runAgent>>) => void;
+    vi.mocked(runAgent).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", {
+      description: "x",
+      isBackground: true,
+    });
+    expect(manager.abort(id)).toBe(true);
+    expect(manager.getRecord(id)?.status).toBe("stopped");
+    expect(manager.hasRunning()).toBe(true);
+
+    let waitSettled = false;
+    const waiting = manager.waitForAll().then(() => { waitSettled = true; });
+    await Promise.resolve();
+    expect(waitSettled).toBe(false);
+
+    finish({ responseText: "partial", session: mockSession(), aborted: true, steered: false });
+    await waiting;
+    expect(waitSettled).toBe(true);
     expect(manager.hasRunning()).toBe(false);
   });
 
