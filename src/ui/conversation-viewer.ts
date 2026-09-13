@@ -8,7 +8,7 @@
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { type Component, Input, matchesKey, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { extractText } from "../context.js";
-import type { AgentRecord } from "../types.js";
+import type { AgentRecord, SteerResult } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent } from "../usage.js";
 import type { Theme } from "./agent-widget.js";
 import { type AgentActivity, buildInvocationTags, describeActivity, fgPreservingNestedStyles, formatDuration, formatSessionTokens, getDisplayName } from "./agent-widget.js";
@@ -31,6 +31,8 @@ export class ConversationViewer implements Component {
   private keys: ViewerKeys;
   /** Steering composer — present while the user is typing a message to the agent. */
   private composer: Input | undefined;
+  private steerInFlight?: Input;
+  private steerFeedback: string | undefined;
 
   constructor(
     private tui: TUI,
@@ -44,7 +46,7 @@ export class ConversationViewer implements Component {
     /** User keybindings from `ctx.ui.custom()`. Omitted → hardcoded defaults. */
     keybindings?: ViewerKeybindings,
     /** Send a steering message to the agent. Omitted → no compose affordance. */
-    private onSteer?: (message: string) => void,
+    private onSteer?: (message: string) => Promise<SteerResult>,
   ) {
     this.keys = createViewerKeys(keybindings);
     this.unsubscribe = session.subscribe(() => {
@@ -54,10 +56,17 @@ export class ConversationViewer implements Component {
   }
 
   handleInput(data: string): void {
-    // While composing a steer message, the input owns all keys (Enter sends,
-    // Esc cancels — both wired in openComposer()). Editing keys flow through.
+    // The composer owns all keys while idle. Submission withholds edits and
+    // Enter until delivery settles; Esc can still close the composer.
     if (this.composer) {
-      this.composer.handleInput(data);
+      if (this.steerInFlight === this.composer) {
+        if (matchesKey(data, "escape")) {
+          this.composer = undefined;
+          this.steerFeedback = undefined;
+        }
+      } else {
+        this.composer.handleInput(data);
+      }
       this.tui.requestRender();
       return;
     }
@@ -181,6 +190,8 @@ export class ConversationViewer implements Component {
 
     // Footer
     lines.push(hrMid);
+    const steerFeedback = this.visibleSteerFeedback();
+    if (steerFeedback) lines.push(row(this.theme.fg("dim", steerFeedback)));
     if (this.composer) {
       // Composer row: the Input renders its own `> ` prompt and cursor.
       lines.push(row(this.composer.render(innerW)[0] ?? ""));
@@ -226,21 +237,42 @@ export class ConversationViewer implements Component {
 
   /** Steerable only when a steer handler exists and the agent is still active. */
   private canSteer(): boolean {
-    return !!this.onSteer && (this.record.status === "running" || this.record.status === "queued");
+    return !this.steerInFlight && !!this.onSteer && (this.record.status === "running" || this.record.status === "queued");
   }
 
   /** Open the inline steering composer and route subsequent input to it. */
   private openComposer(): void {
+    this.steerFeedback = undefined;
     const input = new Input();
     input.focused = true;
-    input.onSubmit = (value: string) => {
+    input.onSubmit = async (value: string) => {
       const message = value.trim();
-      this.composer = undefined;
-      if (message) this.onSteer?.(message);
+      if (!message) {
+        this.composer = undefined;
+        this.tui.requestRender();
+        return;
+      }
+      this.steerInFlight = input;
       this.tui.requestRender();
+      try {
+        const result = await this.onSteer!(message);
+        const stillOwnsComposer = this.composer === input;
+        if (!stillOwnsComposer) return;
+        if (result.status === "accepted" || result.status === "queued") {
+          this.composer = undefined;
+          this.steerFeedback = `Steering ${result.status}.`;
+        } else {
+          input.setValue(value);
+          this.steerFeedback = `Steering rejected: ${result.reason}${result.detail ? ` — ${result.detail}` : ""}.`;
+        }
+      } finally {
+        if (this.steerInFlight === input) this.steerInFlight = undefined;
+        this.tui.requestRender();
+      }
     };
     input.onEscape = () => {
       this.composer = undefined;
+      this.steerFeedback = undefined;
       this.tui.requestRender();
     };
     this.composer = input;
@@ -267,8 +299,12 @@ export class ConversationViewer implements Component {
   }
 
   private chromeLines(): number {
-    // The composer adds one row above the footer hint while it's open.
-    return CHROME_LINES_BASE + (this.invocationLine() ? 1 : 0) + (this.composer ? 1 : 0);
+    // The composer and visible steering feedback each add one chrome row.
+    return CHROME_LINES_BASE + (this.invocationLine() ? 1 : 0) + (this.composer ? 1 : 0) + (this.visibleSteerFeedback() ? 1 : 0);
+  }
+
+  private visibleSteerFeedback(): string | undefined {
+    return this.composer || this.canSteer() ? this.steerFeedback : undefined;
   }
 
   private invocationLine(): string | undefined {

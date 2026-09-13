@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
-  return { ...actual, runAgent: vi.fn() };
+  return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
 });
 
 vi.mock("../src/worktree.js", async () => {
@@ -16,7 +16,7 @@ vi.mock("../src/worktree.js", async () => {
   return { ...actual, createWorktree: vi.fn(), cleanupWorktree: vi.fn() };
 });
 
-import { runAgent } from "../src/agent-runner.js";
+import { resumeAgent, runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import { cleanupWorktree, createWorktree } from "../src/worktree.js";
 
@@ -86,10 +86,24 @@ const flush = async () => {
   await new Promise((r) => setImmediate(r));
 };
 
-function durableEntry(data: unknown) {
+async function spawnBackground(tools: Map<string, any>, callId: string, description: string): Promise<string> {
+  const spawned = await tools.get("Agent").execute(
+    callId,
+    { prompt: "go", description, subagent_type: "general-purpose", run_in_background: true },
+    undefined, undefined, ctx(),
+  );
+  return /Agent ID: (\S+)/.exec(textOf(spawned))![1];
+}
+
+async function awaitBackgroundSettlement(): Promise<void> {
+  await flush();
+  await new Promise((resolve) => setTimeout(resolve, 350));
+}
+
+function durableEntry(data: unknown, customType = "subagents:record") {
   return {
     type: "custom",
-    customType: "subagents:record",
+    customType,
     data,
     id: `e${branch.length}`,
     parentId: null,
@@ -178,6 +192,28 @@ describe("get_subagent_result after live-record eviction", () => {
     );
     expect(textOf(unknown)).toContain("Agent not found");
     expect(activeCtx.sessionManager.getBranch).toHaveBeenCalled();
+
+    await lifecycle.get("session_shutdown")?.();
+  });
+
+  it("does not return an older outcome after a newer resume marker", async () => {
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    const activeCtx = ctx();
+    activeCtx.sessionManager.getBranch.mockReturnValue([
+      durableEntry({ id: "resumed-id", status: "completed", result: "older success" }),
+      durableEntry({ id: "resumed-id" }, "subagents:execution"),
+    ]);
+
+    const result = await tools.get("get_subagent_result").execute(
+      "tc-resumed-missing",
+      { agent_id: "resumed-id" },
+      undefined,
+      undefined,
+      activeCtx,
+    );
+    expect(textOf(result)).toContain("no durable result exists");
+    expect(textOf(result)).not.toContain("older success");
 
     await lifecycle.get("session_shutdown")?.();
   });
@@ -316,8 +352,7 @@ describe("get_subagent_result after live-record eviction", () => {
       aborted: false,
       steered: false,
     });
-    await flush();
-    await new Promise((resolve) => setTimeout(resolve, 350));
+    await awaitBackgroundSettlement();
 
     expect(pi.sendMessage).toHaveBeenCalledWith(expect.objectContaining({
       details: expect.objectContaining({
@@ -352,16 +387,8 @@ describe("get_subagent_result after live-record eviction", () => {
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);
 
-    const spawned = await tools.get("Agent").execute(
-      "tc-preservation-spawn",
-      { prompt: "go", description: "preserve worktree", subagent_type: "general-purpose", run_in_background: true },
-      undefined,
-      undefined,
-      ctx(),
-    );
-    const id = /Agent ID: (\S+)/.exec(textOf(spawned))![1];
-    await flush();
-    await new Promise((resolve) => setTimeout(resolve, 350));
+    const id = await spawnBackground(tools, "tc-preservation-spawn", "preserve worktree");
+    await awaitBackgroundSettlement();
 
     const retrieved = await tools.get("get_subagent_result").execute(
       "tc-preservation-read",
@@ -385,6 +412,176 @@ describe("get_subagent_result after live-record eviction", () => {
         resultPreview: "CHILD-PARTIAL-OUTPUT",
       }),
     }), expect.anything());
+
+    await lifecycle.get("session_shutdown")?.();
+  });
+
+  it("does not resurrect an older durable result when resumed-result persistence fails", async () => {
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "OLDER-DURABLE-RESULT",
+      session: { dispose: vi.fn() } as any,
+      aborted: false,
+      steered: false,
+    } as any);
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "NEW-LIVE-ONLY-RESULT" } as any);
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+
+    const id = await spawnBackground(tools, "tc-resume-spawn", "resumed persistence");
+    await awaitBackgroundSettlement();
+    pi.appendEntry.mockImplementation((customType: string, data: any) => {
+      if (customType === "subagents:record" && data.result === "NEW-LIVE-ONLY-RESULT") {
+        throw new Error("resumed result storage unavailable");
+      }
+      branch.push({ type: "custom", customType, data, id: `e${branch.length}`, parentId: null, timestamp: new Date().toISOString() });
+    });
+
+    const resumed = await tools.get("Agent").execute(
+      "tc-resume",
+      { resume: id, prompt: "continue", description: "resume persistence", subagent_type: "general-purpose" },
+      undefined, undefined, ctx(),
+    );
+    expect(textOf(resumed)).toContain("NEW-LIVE-ONLY-RESULT");
+    expect(textOf(resumed)).toContain("Persistence: failed — resumed result storage unavailable; result is live-only");
+    expect(branch).toContainEqual(expect.objectContaining({
+      customType: "subagents:execution",
+      data: { id },
+    }));
+
+    vi.advanceTimersByTime(11 * 60_000);
+    const evicted = await tools.get("get_subagent_result").execute(
+      "tc-resume-evicted", { agent_id: id }, undefined, undefined, ctx(),
+    );
+    expect(textOf(evicted)).toContain("no durable result exists");
+    expect(textOf(evicted)).not.toContain("OLDER-DURABLE-RESULT");
+
+    await lifecycle.get("session_shutdown")?.();
+  });
+
+  it("persists a stopped fresh foreground call that is already aborted", async () => {
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    const controller = new AbortController();
+    controller.abort();
+
+    await tools.get("Agent").execute(
+      "tc-pre-aborted-fresh",
+      { prompt: "go", description: "pre-aborted fresh", subagent_type: "general-purpose" },
+      controller.signal, undefined, ctx(),
+    );
+    expect(branch.at(-1)).toEqual(expect.objectContaining({
+      customType: "subagents:record",
+      data: expect.objectContaining({ status: "stopped" }),
+    }));
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+
+    await lifecycle.get("session_shutdown")?.();
+  });
+
+  it("persists a stopped outcome when a resume is cancelled before starting", async () => {
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "OLDER-DURABLE-RESULT",
+      session: { dispose: vi.fn() } as any,
+      aborted: false,
+      steered: false,
+    } as any);
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+
+    const id = await spawnBackground(tools, "tc-cancelled-resume-spawn", "cancelled resume");
+    await awaitBackgroundSettlement();
+    pi.sendMessage.mockClear();
+    const controller = new AbortController();
+    controller.abort();
+    await tools.get("Agent").execute(
+      "tc-cancelled-resume",
+      { resume: id, prompt: "continue", description: "cancel resume", subagent_type: "general-purpose" },
+      controller.signal, undefined, ctx(),
+    );
+    expect(branch.slice(-2).map(({ customType }) => customType)).toEqual([
+      "subagents:execution",
+      "subagents:record",
+    ]);
+    expect(branch.at(-1)?.data).toEqual(expect.objectContaining({ id, status: "stopped" }));
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(11 * 60_000);
+    const evicted = await tools.get("get_subagent_result").execute(
+      "tc-cancelled-resume-evicted", { agent_id: id }, undefined, undefined, ctx(),
+    );
+    expect(textOf(evicted)).toContain("Status: stopped");
+    expect(textOf(evicted)).not.toContain("OLDER-DURABLE-RESULT");
+
+    await lifecycle.get("session_shutdown")?.();
+  });
+
+  it("surfaces appendEntry failures only while the result remains live", async () => {
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "LIVE-ONLY-RESULT",
+      session: { dispose: vi.fn() } as any,
+      aborted: false,
+      steered: false,
+    } as any);
+    const { pi, tools, lifecycle } = makePi();
+    pi.appendEntry.mockImplementation(() => { throw new Error("session storage unavailable"); });
+    subagentsExtension(pi);
+
+    const foreground = await tools.get("Agent").execute(
+      "tc-persistence-foreground",
+      { prompt: "go", description: "foreground persistence", subagent_type: "general-purpose" },
+      undefined, undefined, ctx(),
+    );
+    expect(textOf(foreground)).toContain("Persistence: failed — session storage unavailable; result is live-only");
+
+    const id = await spawnBackground(tools, "tc-persistence-background", "background persistence");
+    await awaitBackgroundSettlement();
+
+    expect(pi.sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      details: expect.objectContaining({
+        persistenceFailure: "session storage unavailable",
+      }),
+    }), expect.anything());
+    const notification = pi.sendMessage.mock.calls.at(-1)?.[0];
+    const renderer = pi.registerMessageRenderer.mock.calls.find(([name]: any[]) => name === "subagent-notification")?.[1];
+    const component = renderer(notification, { expanded: false }, {
+      fg: (_role: string, text: string) => text,
+      bold: (text: string) => text,
+    });
+    expect(component.render(120).join("\n")).toContain(
+      "Persistence failed: session storage unavailable; result is live-only",
+    );
+
+    const live = await tools.get("get_subagent_result").execute(
+      "tc-persistence-live", { agent_id: id }, undefined, undefined, ctx(),
+    );
+    expect(textOf(live)).toContain("Persistence: failed — session storage unavailable; result is live-only");
+
+    vi.advanceTimersByTime(11 * 60_000);
+    const evicted = await tools.get("get_subagent_result").execute(
+      "tc-persistence-evicted", { agent_id: id }, undefined, undefined, ctx(),
+    );
+    expect(textOf(evicted)).toContain("Agent not found");
+
+    await lifecycle.get("session_shutdown")?.();
+  });
+
+  it("supplies a visible detail when appendEntry throws an empty Error", async () => {
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "LIVE-ONLY-RESULT",
+      session: { dispose: vi.fn() } as any,
+      aborted: false,
+      steered: false,
+    } as any);
+    const { pi, tools, lifecycle } = makePi();
+    pi.appendEntry.mockImplementation(() => { throw new Error(""); });
+    subagentsExtension(pi);
+
+    const result = await tools.get("Agent").execute(
+      "tc-empty-persistence-error",
+      { prompt: "go", description: "empty persistence error", subagent_type: "general-purpose" },
+      undefined, undefined, ctx(),
+    );
+    expect(textOf(result)).toContain("Persistence: failed — unknown persistence failure; result is live-only");
 
     await lifecycle.get("session_shutdown")?.();
   });

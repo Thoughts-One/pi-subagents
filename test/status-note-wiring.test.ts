@@ -19,6 +19,7 @@ vi.mock("../src/worktree.js", async () => {
   return { ...actual, cleanupWorktree: vi.fn(), createWorktree: vi.fn() };
 });
 
+import { AgentManager } from "../src/agent-manager.js";
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import { cleanupWorktree, createWorktree } from "../src/worktree.js";
@@ -262,6 +263,76 @@ describe("status note reaches the parent through the real handlers", () => {
     expect(pi.events.emit).not.toHaveBeenCalledWith("subagents:failed", expect.objectContaining({ id }));
     expect(pi.appendEntry).not.toHaveBeenCalledWith("subagents:record", expect.objectContaining({ id }));
     expect(pi.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not notify twice when a queued foreground agent is cancelled", async () => {
+    vi.mocked(runAgent).mockReturnValue(new Promise(() => {}) as any);
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    for (let index = 0; index < 4; index++) {
+      await tools.get("Agent").execute(
+        `tc-slot-${index}`,
+        { prompt: "hold", description: `slot ${index}`, subagent_type: "general-purpose", run_in_background: true },
+        undefined, undefined, ctx(),
+      );
+    }
+
+    const controller = new AbortController();
+    const pending = tools.get("Agent").execute(
+      "tc-queued-foreground",
+      { prompt: "wait", description: "queued foreground", subagent_type: "general-purpose" },
+      controller.signal, undefined, ctx(),
+    );
+    await Promise.resolve();
+    controller.abort();
+    await pending;
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+
+    await lifecycle.get("session_shutdown")?.();
+  });
+
+  it("top-level steer_subagent awaits delivery and emits only accepted steering", async () => {
+    vi.mocked(runAgent).mockReturnValue(new Promise(() => {}) as any);
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    const spawn = await tools.get("Agent").execute(
+      "tc-steer-spawn",
+      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: true },
+      undefined, undefined, ctx(),
+    );
+    const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1];
+    let release!: (result: any) => void;
+    const steer = vi.spyOn(AgentManager.prototype, "steer").mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    let settled = false;
+    const pending = tools.get("steer_subagent").execute(
+      "tc-steer-await", { agent_id: id, message: "redirect" }, undefined, undefined, ctx(),
+    ).then((result: any) => { settled = true; return result; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    release({ status: "rejected", reason: "delivery_failed", detail: "transport closed" });
+    const rejected = await pending;
+    expect(rejected.isError).toBe(true);
+    expect(textOf(rejected)).toContain("Steering rejected");
+    expect(textOf(rejected)).toContain("transport closed");
+    expect(pi.events.emit).not.toHaveBeenCalledWith("subagents:steered", expect.anything());
+
+    steer.mockResolvedValueOnce({ status: "queued" });
+    const queued = await tools.get("steer_subagent").execute(
+      "tc-steer-queued", { agent_id: id, message: "queue this" }, undefined, undefined, ctx(),
+    );
+    expect(queued.isError).not.toBe(true);
+    expect(textOf(queued)).toContain("Steering message queued");
+    expect(pi.events.emit).not.toHaveBeenCalledWith("subagents:steered", expect.anything());
+
+    steer.mockResolvedValueOnce({ status: "accepted" });
+    const accepted = await tools.get("steer_subagent").execute(
+      "tc-steer-accepted", { agent_id: id, message: "accept this" }, undefined, undefined, ctx(),
+    );
+    expect(accepted.isError).not.toBe(true);
+    expect(textOf(accepted)).toContain("Steering message accepted");
+    expect(pi.events.emit).toHaveBeenCalledWith("subagents:steered", { id, message: "accept this" });
+
+    await lifecycle.get("session_shutdown")?.();
   });
 
   it("background user-stop → get_subagent_result flags STOPPED BY THE USER (not completed)", async () => {

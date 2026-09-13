@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -129,6 +129,8 @@ describe("worktree", () => {
       expect(result.hasChanges).toBe(true);
       expect(result.branch).toBeDefined();
       expect(result.branch).toContain("pi-agent-dirty-1");
+      expect(result.repository).toBe(realpathSync(repoDir));
+      expect(result.commit).toMatch(/^[0-9a-f]{40}$/);
 
       // Verify the branch exists in the main repo
       const branches = execFileSync("git", ["branch", "--list", result.branch!], {
@@ -141,6 +143,9 @@ describe("worktree", () => {
         cwd: repoDir, stdio: "pipe",
       }).toString().trim();
       expect(log).toContain("pi-agent: added new file");
+      expect(result.commit).toBe(execFileSync("git", ["rev-parse", result.branch!], {
+        cwd: repoDir, stdio: "pipe",
+      }).toString().trim());
 
       // Cleanup branch
       try { execFileSync("git", ["branch", "-D", result.branch!], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
@@ -157,7 +162,7 @@ describe("worktree", () => {
       expect(result).toEqual(expect.objectContaining({
         hasChanges: true,
         path: wt.path,
-        error: "inspect worktree changes failed: Git inspection timed out",
+        error: "verify worktree repository failed: Git inspection timed out",
       }));
       expect(existsSync(wt.path)).toBe(true);
 
@@ -227,6 +232,46 @@ describe("worktree", () => {
 
       // Cleanup branch
       try { execFileSync("git", ["branch", "-D", result.branch!], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
+    });
+
+    it("retains a worktree from another repository without writing to it", () => {
+      const otherRepo = initGitRepo();
+      const foreign = createWorktree(otherRepo, "foreign")!;
+      writeFileSync(join(foreign.path, "unfinished.txt"), "keep this uncommitted");
+      const before = execFileSync("git", ["rev-parse", "HEAD"], { cwd: foreign.path, stdio: "pipe" }).toString().trim();
+      try {
+        const result = cleanupWorktree(repoDir, foreign, "wrong repository");
+        expect(result).toMatchObject({ hasChanges: true, path: foreign.path });
+        expect(result.error).toContain("wrong_repository: worktree common dir");
+        expect(existsSync(foreign.path)).toBe(true);
+        expect(execFileSync("git", ["rev-parse", "HEAD"], { cwd: foreign.path, stdio: "pipe" }).toString().trim()).toBe(before);
+        expect(execFileSync("git", ["status", "--porcelain"], { cwd: foreign.path, stdio: "pipe" }).toString()).toContain("?? unfinished.txt");
+      } finally {
+        try { execFileSync("git", ["worktree", "remove", "--force", foreign.path], { cwd: otherRepo, stdio: "pipe" }); } catch { /* ignore */ }
+        rmSync(otherRepo, { recursive: true, force: true });
+      }
+    });
+
+    it("retains the worktree when the branch does not point to its HEAD", () => {
+      const wt = createWorktree(repoDir, "branch-mismatch")!;
+      writeFileSync(join(wt.path, "changed.txt"), "changed");
+      const exec = vi.mocked(execFileSync);
+      const original = exec.getMockImplementation()!;
+      exec.mockImplementation(((command, args, options) => {
+        if (command === "git" && args[0] === "rev-parse" && args[1] === "--verify" && String(args[2]).startsWith("refs/heads/")) {
+          return Buffer.from("0".repeat(40));
+        }
+        return original(command, args, options as any);
+      }) as any);
+      try {
+        const result = cleanupWorktree(repoDir, wt, "branch mismatch");
+        expect(result).toMatchObject({ hasChanges: true, path: wt.path });
+        expect(result.error).toContain(`branch_mismatch: ${wt.branch} points to ${"0".repeat(40)}`);
+        expect(existsSync(wt.path)).toBe(true);
+      } finally {
+        exec.mockRestore();
+        try { execFileSync("git", ["worktree", "remove", "--force", wt.path], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
+      }
     });
 
     it("does not force-overwrite existing branch", () => {

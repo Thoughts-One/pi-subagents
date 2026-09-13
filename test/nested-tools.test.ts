@@ -12,6 +12,7 @@ let manager: NestedAgentManager;
 let records: Map<string, any>;
 let spawn: ReturnType<typeof vi.fn>;
 let spawnAndWait: ReturnType<typeof vi.fn>;
+let steer: ReturnType<typeof vi.fn>;
 
 function writeAgent(name: string, extra = "") {
   const dir = join(cwd, ".pi", "agents");
@@ -74,11 +75,13 @@ beforeEach(() => {
     records.set(id, record);
     return { id, record };
   });
+  steer = vi.fn(async () => ({ status: "accepted" as const }));
   manager = {
     spawn,
     spawnAndWait,
     getRecord: (id: string) => records.get(id),
     resume: vi.fn(),
+    steer,
   } as any;
 });
 
@@ -216,19 +219,23 @@ describe("child-safe nested Agent tools", () => {
     );
   });
 
-  it("queues a steer for an owned child whose session is not ready yet", async () => {
-    const [, , steer] = tools();
-    const record: Record<string, unknown> = {
+  it("awaits the manager steer result for an owned child", async () => {
+    const [, , steerTool] = tools();
+    records.set("child-1", {
       id: "child-1",
       status: "running",
       parentAgentId: "parent-1",
-    };
-    records.set("child-1", record);
+    });
+    let release!: (result: { status: "queued" }) => void;
+    steer.mockImplementation(() => new Promise<{ status: "queued" }>((resolve) => { release = resolve; }));
 
-    const result = await execute(steer, { agent_id: "child-1", message: "focus on tests" });
+    const pending = execute(steerTool, { agent_id: "child-1", message: "focus on tests" });
+    expect(steer).toHaveBeenCalledWith("child-1", "focus on tests");
+    release({ status: "queued" });
 
+    const result = await pending;
     expect(result.isError).toBe(false);
-    expect(record.pendingSteers).toEqual(["focus on tests"]);
+    expect(result.content[0].text).toBe("Steering message queued for nested agent child-1.");
   });
 
   it("blocks delegation at the inherited depth cap", async () => {

@@ -21,13 +21,14 @@ import {
 } from "./documentation-audit.js";
 import { resolveModel } from "./model-resolver.js";
 import { validateResultContract } from "./result-contract.js";
-import type { AgentInvocation, AgentRecord, DocumentationAuditAdmission, IsolationMode, ModelAuthority, SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentInvocation, AgentRecord, DocumentationAuditAdmission, IsolationMode, ModelAuthority, SteerResult, SubagentType, ThinkingLevel } from "./types.js";
 import { type AttributedUsageEvent, addUsage, createLifetimeUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
 
 export type OnAgentComplete = (record: AgentRecord) => void;
 export type OnAgentStart = (record: AgentRecord) => void;
 export type OnAgentCompact = (record: AgentRecord, info: CompactionInfo) => void;
+export type OnBeforeResume = (record: AgentRecord) => void;
 export type CompactionInfo = { reason: "manual" | "threshold" | "overflow"; tokensBefore: number };
 
 /** Default max concurrent top-level agents. */
@@ -107,6 +108,8 @@ interface QueueEntry {
   id: string;
   start: () => void;
   signal?: AbortSignal;
+  /** A canceled resume returns inline, so completion notification is already consumed. */
+  consumeResultOnCancel?: boolean;
 }
 
 interface SpawnOptions {
@@ -166,6 +169,7 @@ export class AgentManager {
   private onComplete?: OnAgentComplete;
   private onStart?: OnAgentStart;
   private onCompact?: OnAgentCompact;
+  private onBeforeResume?: OnBeforeResume;
   private maxConcurrent: number;
   /** Base repos worktrees were created from — so dispose() can prune them all,
    *  not just the parent repo (caller-supplied cwd can target other repos). */
@@ -191,10 +195,12 @@ export class AgentManager {
     maxConcurrent = DEFAULT_MAX_CONCURRENT,
     onStart?: OnAgentStart,
     onCompact?: OnAgentCompact,
+    onBeforeResume?: OnBeforeResume,
   ) {
     this.onComplete = onComplete;
     this.onStart = onStart;
     this.onCompact = onCompact;
+    this.onBeforeResume = onBeforeResume;
     this.maxConcurrent = maxConcurrent;
     // Cleanup completed agents after 10 minutes (but keep sessions for resume)
     this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
@@ -236,6 +242,15 @@ export class AgentManager {
   private settleCompletion(id: string, result = ""): void {
     this.completionResolvers.get(id)?.(result);
     this.completionResolvers.delete(id);
+  }
+
+  private finalizeStoppedBeforeStart(record: AgentRecord, resultConsumed: boolean): void {
+    record.status = "stopped";
+    record.completedAt = Date.now();
+    if (resultConsumed) record.resultConsumed = true;
+    this.releaseWriter(record);
+    try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
+    this.settleCompletion(record.id);
   }
 
   private writerOwner(parentAgentId: string | undefined): AgentRecord | undefined {
@@ -310,7 +325,9 @@ export class AgentManager {
       // parent session's — say so, or the orchestrator merges in the wrong repo.
       const repoNote = customCwd !== undefined ? ` in \`${baseCwd}\`` : "";
       record.result = (record.result ?? "") +
-        `\n\n---\nChanges saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git merge ${wtResult.branch}\`${customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : ""}`;
+        `\n\n---\nChanges saved to branch \`${wtResult.branch}\`${repoNote}.\n` +
+        `Repository: \`${wtResult.repository}\`\nCommit: \`${wtResult.commit}\`\n` +
+        `Merge with: \`git merge ${wtResult.branch}\`${customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : ""}`;
     }
   }
 
@@ -389,10 +406,7 @@ export class AgentManager {
     this.reserveWriter(record);
 
     if (options.signal?.aborted) {
-      record.status = "stopped";
-      record.completedAt = Date.now();
-      this.releaseWriter(record);
-      this.settleCompletion(id);
+      this.finalizeStoppedBeforeStart(record, options.isBackground === false);
       return id;
     }
 
@@ -401,6 +415,7 @@ export class AgentManager {
       id,
       signal: options.signal,
       start: () => this.startAgent(id, record, args),
+      consumeResultOnCancel: options.isBackground === false,
     };
 
     if (occupiesPoolSlot(record) && this.runningTopLevel.size >= this.maxConcurrent) {
@@ -429,10 +444,7 @@ export class AgentManager {
   private startAgent(id: string, record: AgentRecord, { pi, ctx, type, prompt, options }: SpawnArgs) {
     this.disarmQueuedAbort(id);
     if (options.signal?.aborted) {
-      record.status = "stopped";
-      record.completedAt = Date.now();
-      this.releaseWriter(record);
-      this.settleCompletion(id);
+      this.finalizeStoppedBeforeStart(record, options.isBackground === false);
       return;
     }
     // Re-validate a caller-supplied cwd: queued spawns can start minutes after
@@ -526,7 +538,7 @@ export class AgentManager {
       onSessionCreated: (session) => {
         record.session = session;
         record.sessionFile = session.sessionFile;
-        // Flush any steers that arrived before the session was ready
+        // Pending steers are volatile: flush is fire-and-forget and failures are unproved.
         if (record.pendingSteers?.length) {
           for (const msg of record.pendingSteers) {
             session.steer(msg).catch(() => {});
@@ -658,10 +670,7 @@ export class AgentManager {
   private startResume(record: AgentRecord, prompt: string, signal?: AbortSignal): void {
     this.disarmQueuedAbort(record.id);
     if (signal?.aborted) {
-      record.status = "stopped";
-      record.completedAt = Date.now();
-      this.releaseWriter(record);
-      this.settleCompletion(record.id);
+      this.finalizeStoppedBeforeStart(record, true);
       return;
     }
 
@@ -745,9 +754,11 @@ export class AgentManager {
       throw new Error(`Cannot resume write-class agent while "${activeWriter.description}" is active.`);
     }
 
+    this.onBeforeResume?.(record);
     record.completedAt = undefined;
     record.result = undefined;
     record.error = undefined;
+    record.persistenceFailure = undefined;
     record.resultConsumed = undefined;
     record.abortController = new AbortController();
     record.status = "queued";
@@ -755,10 +766,7 @@ export class AgentManager {
     this.reserveWriter(record, "resume");
 
     if (signal?.aborted) {
-      record.status = "stopped";
-      record.completedAt = Date.now();
-      this.releaseWriter(record);
-      this.settleCompletion(record.id);
+      this.finalizeStoppedBeforeStart(record, true);
       return record;
     }
 
@@ -766,6 +774,7 @@ export class AgentManager {
       id,
       signal,
       start: () => this.startResume(record, prompt, signal),
+      consumeResultOnCancel: true,
     };
     if (occupiesPoolSlot(record) && this.runningTopLevel.size >= this.maxConcurrent) {
       this.queue.push(entry);
@@ -779,24 +788,33 @@ export class AgentManager {
   }
 
   /**
-   * Send a steering message to an agent from the UI (mirrors the steer_subagent
-   * tool). A live session delivers it now — it interrupts the agent after its
-   * current tool execution and appears as a user message. If the session isn't
-   * ready yet, the message is queued on `pendingSteers` and flushed when the
-   * session is created. Returns false if the agent can't accept steering
-   * (unknown id, or no longer running/queued).
+   * Send a steering message to a live agent. A session-less active agent queues
+   * the message for its volatile fire-and-forget session-ready flush.
    */
-  steer(id: string, message: string): boolean {
+  async steer(id: string, message: string): Promise<SteerResult> {
     const record = this.agents.get(id);
-    if (!record) return false;
-    if (record.status !== "running" && record.status !== "queued") return false;
-    if (record.session) {
-      record.session.steer(message).catch(() => {});
-    } else {
+    if (!record) return { status: "rejected", reason: "unknown" };
+    if (record.status !== "running" && record.status !== "queued") {
+      return { status: "rejected", reason: "not_running", detail: `status: ${record.status}` };
+    }
+    if (!record.session) {
       if (!record.pendingSteers) record.pendingSteers = [];
       record.pendingSteers.push(message);
+      return { status: "queued" };
     }
-    return true;
+    try {
+      await record.session.steer(message);
+    } catch (error) {
+      return {
+        status: "rejected",
+        reason: "delivery_failed",
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
+    if (record.status !== "running" && record.status !== "queued") {
+      return { status: "rejected", reason: "not_running", detail: "settled during submission" };
+    }
+    return { status: "accepted" };
   }
 
   getRecord(id: string): AgentRecord | undefined {
@@ -823,12 +841,10 @@ export class AgentManager {
 
     // Remove from queue if queued
     if (record.status === "queued") {
-      this.queue = this.queue.filter(q => q.id !== id);
+      const queued = this.queue.find((entry) => entry.id === id);
+      this.queue = this.queue.filter((entry) => entry.id !== id);
       this.disarmQueuedAbort(id);
-      record.status = "stopped";
-      record.completedAt = Date.now();
-      this.releaseWriter(record);
-      this.settleCompletion(id);
+      this.finalizeStoppedBeforeStart(record, queued?.consumeResultOnCancel === true);
       return true;
     }
 

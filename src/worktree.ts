@@ -10,7 +10,7 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 
 export interface WorktreeInfo {
   /** Absolute path to the worktree directory (the copied repo's root). */
@@ -31,20 +31,28 @@ export interface WorktreeInfo {
 export type WorktreeCleanupResult =
   | {
     hasChanges: false;
+    repository?: never;
     branch?: never;
+    commit?: never;
     path?: never;
     error?: never;
   }
   | {
     hasChanges: true;
+    /** Canonical repository that owns the preserved branch. */
+    repository: string;
     /** Branch containing the preserved changes. */
     branch: string;
+    /** Verified branch tip. */
+    commit: string;
     path: string;
     error?: never;
   }
   | {
     hasChanges: true;
+    repository?: never;
     branch?: never;
+    commit?: never;
     /** Retained worktree path containing the unfinished changes. */
     path: string;
     /** Why inspection or preservation failed. */
@@ -108,8 +116,23 @@ export function cleanupWorktree(
     return { hasChanges: false };
   }
 
-  let operation = "inspect worktree changes";
+  let operation = "verify worktree repository";
   try {
+    const worktreeCommonDir = realpathSync(resolve(worktree.path, execFileSync("git", ["rev-parse", "--git-common-dir"], {
+      cwd: worktree.path,
+      stdio: "pipe",
+      timeout: 5000,
+    }).toString().trim()));
+    const repositoryCommonDir = realpathSync(resolve(cwd, execFileSync("git", ["rev-parse", "--git-common-dir"], {
+      cwd,
+      stdio: "pipe",
+      timeout: 5000,
+    }).toString().trim()));
+    if (worktreeCommonDir !== repositoryCommonDir) {
+      return { hasChanges: true, path: worktree.path, error: `wrong_repository: worktree common dir ${worktreeCommonDir} differs from repository common dir ${repositoryCommonDir}` };
+    }
+
+    operation = "inspect worktree changes";
     const status = execFileSync("git", ["status", "--porcelain"], {
       cwd: worktree.path,
       stdio: "pipe",
@@ -137,7 +160,7 @@ export function cleanupWorktree(
       }).toString().trim();
 
       if (currentSha === worktree.baseSha) {
-        // No changes — remove worktree
+        // No changes — remove worktree only after repository identity verification.
         removeWorktree(cwd, worktree.path);
         return { hasChanges: false };
       }
@@ -163,15 +186,34 @@ export function cleanupWorktree(
         timeout: 5000,
       });
     }
-    // Update branch name in worktree info for the caller
-    worktree.branch = branchName;
+    operation = "verify preservation branch";
+    const commit = execFileSync("git", ["rev-parse", "--verify", "HEAD^{commit}"], {
+      cwd: worktree.path,
+      stdio: "pipe",
+      timeout: 5000,
+    }).toString().trim();
+    const branchCommit = execFileSync("git", ["rev-parse", "--verify", `refs/heads/${branchName}^{commit}`], {
+      cwd,
+      stdio: "pipe",
+      timeout: 5000,
+    }).toString().trim();
+    if (branchCommit !== commit) {
+      return { hasChanges: true, path: worktree.path, error: `branch_mismatch: ${branchName} points to ${branchCommit}; worktree HEAD is ${commit}` };
+    }
+    const repository = realpathSync(execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      stdio: "pipe",
+      timeout: 5000,
+    }).toString().trim());
 
-    // Remove the worktree (branch persists in main repo)
+    // Remove the worktree only after the branch tip and repository identity match.
     removeWorktree(cwd, worktree.path);
 
     return {
       hasChanges: true,
-      branch: worktree.branch,
+      repository,
+      branch: branchName,
+      commit,
       path: worktree.path,
     };
   } catch (error) {

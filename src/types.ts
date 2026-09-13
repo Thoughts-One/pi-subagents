@@ -75,6 +75,11 @@ export interface AgentConfig {
 
 export type JoinMode = 'async' | 'group' | 'smart';
 
+export type SteerResult =
+  | { status: "accepted" }
+  | { status: "queued" }
+  | { status: "rejected"; reason: "unknown" | "not_running" | "delivery_failed"; detail?: string };
+
 /** A frontmatter-declared outer result contract. */
 export type ResultContract = "plan-authority";
 
@@ -183,6 +188,8 @@ export interface AgentRecord {
   documentationAuditAdmission?: DocumentationAuditAdmission;
   /** Result contract resolved from frontmatter at spawn time. */
   resultContract?: ResultContract;
+  /** Persistence error for the current live result; no durable outcome was written. */
+  persistenceFailure?: string;
 }
 
 /** Resolved model configuration from the registry that authorized a spawn. */
@@ -214,6 +221,8 @@ export interface NotificationDetails {
   sessionFile?: string;
   error?: string;
   resultPreview: string;
+  /** Visible warning when the result exists only in the live record. */
+  persistenceFailure?: string;
   /** Additional agents in a group notification. */
   others?: NotificationDetails[];
 }

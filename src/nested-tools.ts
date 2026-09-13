@@ -22,12 +22,14 @@ import { resolveAgentInvocationConfig } from "./invocation-config.js";
 import { resolveModel } from "./model-resolver.js";
 import { checkModelScope } from "./model-scope.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
+import { formatSteerResult } from "./steer-result.js";
 import type {
   AgentConfig,
   AgentInvocation,
   AgentRecord,
   IsolationMode,
   ModelAuthority,
+  SteerResult,
   ThinkingLevel,
 } from "./types.js";
 
@@ -81,6 +83,7 @@ export interface NestedAgentManager {
   ): Promise<{ id: string; record: AgentRecord }>;
   getRecord(id: string): AgentRecord | undefined;
   resume(id: string, prompt: string, signal?: AbortSignal): Promise<AgentRecord | undefined>;
+  steer(id: string, message: string): Promise<SteerResult>;
 }
 
 export interface NestedToolContext {
@@ -319,29 +322,19 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
   const steerTool = defineTool({
     name: NESTED_TOOL_NAMES[2],
     label: "Steer Nested Agent",
-    description: "Send guidance to a running nested agent owned by this parent.",
+    description: "Send guidance to a running or queued nested agent owned by this parent.",
     parameters: Type.Object({
       agent_id: Type.String(),
       message: Type.String(),
     }),
     execute: async (_toolCallId, params) => {
       const record = context.manager.getRecord(params.agent_id);
-      if (!ownsRecord(record, context.parentAgentId) || record.status !== "running") {
-        return textResult(`Running nested agent not found or not owned by this parent: "${params.agent_id}".`, true);
+      if (!ownsRecord(record, context.parentAgentId)) {
+        return textResult(`Nested agent not found or not owned by this parent: "${params.agent_id}".`, true);
       }
-      // Session not ready yet — queue the steer. The manager flushes pending
-      // steers when the session is created (same contract as the top-level tool).
-      if (!record.session) {
-        if (!record.pendingSteers) record.pendingSteers = [];
-        record.pendingSteers.push(params.message);
-        return textResult(`Steering message queued for nested agent ${params.agent_id}.`);
-      }
-      try {
-        await record.session.steer(params.message);
-      } catch (err) {
-        return textResult(`Failed to steer nested agent: ${err instanceof Error ? err.message : String(err)}`, true);
-      }
-      return textResult(`Steering message sent to nested agent ${params.agent_id}.`);
+      const result = await context.manager.steer(params.agent_id, params.message);
+      const formatted = formatSteerResult(result, `nested agent ${params.agent_id}`);
+      return textResult(formatted.text, formatted.isError);
     },
   });
 

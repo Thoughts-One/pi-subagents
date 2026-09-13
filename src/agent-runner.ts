@@ -1040,17 +1040,6 @@ export async function resumeAgent(
 }
 
 /**
- * Send a steering message to a running subagent.
- * The message will interrupt the agent after its current tool execution.
- */
-export async function steerAgent(
-  session: AgentSession,
-  message: string,
-): Promise<void> {
-  await session.steer(message);
-}
-
-/**
  * Get the subagent's conversation messages as formatted text.
  */
 export function getAgentConversation(session: AgentSession): string {

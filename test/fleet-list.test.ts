@@ -56,7 +56,7 @@ function fakeManager(agents: AgentRecord[]): AgentManager {
   return {
     listAgents: () => agents,
     abort: () => true,
-    steer: vi.fn(() => true),
+    steer: vi.fn(async () => ({ status: "accepted" as const })),
   } as unknown as AgentManager;
 }
 
@@ -415,7 +415,7 @@ describe("FleetList overlay lifecycle", () => {
     expect(h.render().find(l => l.includes("three"))).toContain("○");
   });
 
-  it("wires the viewer's steer composer to manager.steer with the agent id", () => {
+  it("wires the viewer's steer composer to the awaited manager.steer contract", async () => {
     const agents = [makeRecord({ id: "live", description: "the one" })];
     const h = harness(agents);
     h.press(DOWN);  // activate (main)
@@ -427,6 +427,7 @@ describe("FleetList overlay lifecycle", () => {
     viewer!.handleInput("\r");                       // Enter → open composer
     for (const ch of "go left") viewer!.handleInput(ch);
     viewer!.handleInput("\r");                       // Enter → send
+    await Promise.resolve();
 
     expect(h.manager.steer).toHaveBeenCalledWith("live", "go left");
   });

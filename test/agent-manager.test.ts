@@ -29,10 +29,10 @@ const mockCtx = { cwd: "/tmp" } as any;
 
 const mockSession = () => ({ dispose: vi.fn() } as any);
 
-const resolvedRun = () =>
+const resolvedRun = (session = mockSession()) =>
   vi.mocked(runAgent).mockResolvedValue({
     responseText: "done",
-    session: mockSession(),
+    session,
     aborted: false,
     steered: false,
   });
@@ -230,7 +230,8 @@ describe("AgentManager — governed top-level admission", () => {
       extensions: false, skills: false, systemPrompt: "Read.",
     }]]));
     manager = new AgentManager(undefined, 1);
-    resolvedRun();
+    const queuedSteer = vi.fn(async () => {});
+    resolvedRun({ ...mockSession(), steer: queuedSteer });
     const resumable = manager.spawn(mockPi, mockCtx, "reader", "first", {
       description: "resumable", isBackground: true,
     });
@@ -248,6 +249,8 @@ describe("AgentManager — governed top-level admission", () => {
     const resumed = manager.resume(resumable, "continue");
     expect(manager.getRecord(resumable)?.status).toBe("queued");
     expect(resumeAgent).not.toHaveBeenCalled();
+    await expect(manager.steer(resumable, "queued direction")).resolves.toEqual({ status: "accepted" });
+    expect(queuedSteer).toHaveBeenCalledWith("queued direction");
 
     finishBlocker({ responseText: "done", session: mockSession(), aborted: false, steered: false });
     await manager.getRecord(blocker)!.promise;
@@ -881,6 +884,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     expect(manager.getRecord(id)!.compactionCount).toBe(0);
 
     // Now resume — drive callbacks via the mocked resumeAgent
+    manager.getRecord(id)!.persistenceFailure = "prior write failed";
     const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
     vi.mocked(resumeMock).mockImplementation(async (_session, _prompt, opts: any) => {
       opts.onUsage?.({ kind: "model", model: { provider: "anthropic", model: "child" }, usage: {
@@ -897,6 +901,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
       calls: 1, input: 70, output: 30, cacheWrite: 5,
     });
     expect(manager.getRecord(id)!.compactionCount).toBe(1);
+    expect(manager.getRecord(id)!.persistenceFailure).toBeUndefined();
   });
 });
 
@@ -957,10 +962,35 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
   });
 });
 
-describe("AgentManager — worktree preservation failures", () => {
+describe("AgentManager — worktree preservation", () => {
   let manager: AgentManager;
 
   afterEach(() => manager?.dispose());
+
+  it("reports the verified preserved repository, branch, and commit", async () => {
+    vi.mocked(createWorktree).mockReturnValueOnce({
+      path: "/tmp/pi-agent-preserved", branch: "pi-agent-preserved", baseSha: "base", workPath: "/tmp/pi-agent-preserved",
+    });
+    vi.mocked(cleanupWorktree).mockReturnValueOnce({
+      hasChanges: true,
+      repository: "/repo",
+      branch: "pi-agent-preserved",
+      commit: "a".repeat(40),
+      path: "/tmp/pi-agent-preserved",
+    });
+    manager = new AgentManager();
+    resolvedRun();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "preserved", isBackground: true, isolation: "worktree",
+    });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    expect(record.result).toContain("Changes saved to branch `pi-agent-preserved`");
+    expect(record.result).toContain("Repository: `/repo`");
+    expect(record.result).toContain(`Commit: \`${"a".repeat(40)}\``);
+  });
 
   it("turns an otherwise completed execution into error while retaining its result", async () => {
     vi.mocked(createWorktree).mockReturnValueOnce({
@@ -1285,46 +1315,73 @@ describe("AgentManager — steer()", () => {
   let manager: AgentManager;
   afterEach(() => manager?.dispose());
 
-  it("returns false for an unknown id", () => {
-    manager = new AgentManager();
-    expect(manager.steer("nope", "hi")).toBe(false);
-  });
-
-  it("delivers to a live session via session.steer()", () => {
-    manager = new AgentManager();
-    const steer = vi.fn(() => Promise.resolve());
-    let captured: ((s: any) => void) | undefined;
-    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) => {
-      captured = (opts as any)?.onSessionCreated;
+  function spawnWithSession(steer: ReturnType<typeof vi.fn>): string {
+    let captured: ((session: any) => void) | undefined;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, options) => {
+      captured = (options as any)?.onSessionCreated;
       return new Promise(() => {});
     });
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
-    // Simulate the session becoming ready.
     captured?.({ steer, dispose: vi.fn() });
+    return id;
+  }
 
-    expect(manager.steer(id, "go left")).toBe(true);
+  it("rejects an unknown id", async () => {
+    manager = new AgentManager();
+    await expect(manager.steer("nope", "hi")).resolves.toEqual({ status: "rejected", reason: "unknown" });
+  });
+
+  it("accepts delivery to a live session after session.steer resolves", async () => {
+    manager = new AgentManager();
+    const steer = vi.fn(() => Promise.resolve());
+    const id = spawnWithSession(steer);
+
+    await expect(manager.steer(id, "go left")).resolves.toEqual({ status: "accepted" });
     expect(steer).toHaveBeenCalledWith("go left");
   });
 
-  it("queues onto pendingSteers when the session isn't ready yet", () => {
+  it("queues when the session isn't ready yet", async () => {
     manager = new AgentManager();
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
     const record = manager.getRecord(id)!;
-    record.session = undefined; // not ready
+    record.session = undefined;
 
-    expect(manager.steer(id, "first")).toBe(true);
-    expect(manager.steer(id, "second")).toBe(true);
+    await expect(manager.steer(id, "first")).resolves.toEqual({ status: "queued" });
+    await expect(manager.steer(id, "second")).resolves.toEqual({ status: "queued" });
     expect(record.pendingSteers).toEqual(["first", "second"]);
   });
 
-  it("refuses to steer an agent that is no longer running", async () => {
+  it("rejects delivery failures with their detail", async () => {
+    manager = new AgentManager();
+    const id = spawnWithSession(vi.fn(() => Promise.reject(new Error("transport closed"))));
+
+    await expect(manager.steer(id, "go left")).resolves.toEqual({
+      status: "rejected", reason: "delivery_failed", detail: "transport closed",
+    });
+  });
+
+  it("rejects an agent that settles during submission", async () => {
+    manager = new AgentManager();
+    let release!: () => void;
+    const id = spawnWithSession(vi.fn(() => new Promise<void>((resolve) => { release = resolve; })));
+
+    const submitted = manager.steer(id, "go left");
+    expect(manager.abort(id)).toBe(true);
+    release();
+
+    await expect(submitted).resolves.toEqual({
+      status: "rejected", reason: "not_running", detail: "settled during submission",
+    });
+  });
+
+  it("rejects an agent that is no longer running", async () => {
     manager = new AgentManager();
     resolvedRun();
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: false });
     await manager.getRecord(id)?.promise;
     expect(manager.getRecord(id)?.status).toBe("completed");
-    expect(manager.steer(id, "too late")).toBe(false);
+    await expect(manager.steer(id, "too late")).resolves.toEqual({ status: "rejected", reason: "not_running", detail: "status: completed" });
   });
 });
 

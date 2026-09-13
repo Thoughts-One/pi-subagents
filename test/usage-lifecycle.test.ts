@@ -143,7 +143,10 @@ describe("subagents:record usage settlement", () => {
 
     await tools.get("Agent").execute("call", params({ resume: id }), undefined, undefined, ctx);
 
-    const secondRecord = pi.appendEntry.mock.calls[1][1];
+    const secondRecord = pi.appendEntry.mock.calls
+      .filter(([type]) => type === "subagents:record")
+      .at(-1)?.[1];
+    expect(pi.appendEntry).toHaveBeenCalledWith("subagents:execution", { id });
     expect(firstRecord.usage).toMatchObject({
       cumulative: true,
       models: { "anthropic/claude-child": expect.objectContaining({ calls: 1, input: 1, output: 2, cacheRead: 3, cacheWrite: 4 }) },

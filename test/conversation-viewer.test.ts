@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentRecord } from "../src/types.js";
+import type { AgentRecord, SteerResult } from "../src/types.js";
 
 // ── Mock wrapTextWithAnsi ──────────────────────────────────────────────
 // We need to control what wrapTextWithAnsi returns to simulate the
@@ -405,14 +405,14 @@ describe("ConversationViewer", () => {
   describe("steer composer", () => {
     const W = 80;
 
-    function makeViewer(opts: { status?: AgentRecord["status"]; onSteer?: (m: string) => void } = {}) {
-      const onSteer = opts.onSteer ?? vi.fn();
+    function makeViewer(opts: { status?: AgentRecord["status"]; onSteer?: (m: string) => Promise<SteerResult> } = {}) {
+      const onSteer = opts.onSteer ?? vi.fn(async () => ({ status: "accepted" as const }));
       const tui = mockTui(30, W);
+      const record = mockRecord({ status: opts.status ?? "running" });
       const viewer = new ConversationViewer(
-        tui, mockSession(), mockRecord({ status: opts.status ?? "running" }),
-        undefined, ansiTheme(), vi.fn(), undefined, undefined, onSteer,
+        tui, mockSession(), record, undefined, ansiTheme(), vi.fn(), undefined, undefined, onSteer,
       );
-      return { viewer, tui, onSteer };
+      return { viewer, tui, onSteer, record };
     }
 
     it("offers the steer affordance for a running agent and opens on Enter", () => {
@@ -426,14 +426,89 @@ describe("ConversationViewer", () => {
       expect(out).not.toContain("Enter steer");
     });
 
-    it("typing then Enter sends the trimmed message and closes the composer", () => {
+    it("typing then Enter sends the trimmed message and closes the composer on acceptance", async () => {
       const { viewer, onSteer } = makeViewer();
       viewer.handleInput("\r"); // open composer
       for (const ch of "  hello  ") viewer.handleInput(ch);
       viewer.handleInput("\r"); // send
+      await Promise.resolve();
 
       expect(onSteer).toHaveBeenCalledWith("hello");
       expect(viewer.render(W).join("\n")).not.toContain("Enter send"); // composer closed
+      expect(viewer.render(W).join("\n")).toContain("Steering accepted.");
+    });
+
+    it("clears accepted feedback when a new submission starts or the agent settles", async () => {
+      const { viewer, record } = makeViewer();
+      viewer.handleInput("\r");
+      for (const ch of "first") viewer.handleInput(ch);
+      viewer.handleInput("\r");
+      await Promise.resolve();
+      expect(viewer.render(W).join("\n")).toContain("Steering accepted.");
+
+      viewer.handleInput("\r");
+      expect(viewer.render(W).join("\n")).not.toContain("Steering accepted.");
+      for (const ch of "second") viewer.handleInput(ch);
+      viewer.handleInput("\r");
+      await Promise.resolve();
+      expect(viewer.render(W).join("\n")).toContain("Steering accepted.");
+      record.status = "completed";
+      expect(viewer.render(W).join("\n")).not.toContain("Steering accepted.");
+    });
+
+    it("retains text and shows the rejection while keeping the composer open", async () => {
+      const { viewer } = makeViewer({
+        onSteer: vi.fn(async () => ({ status: "rejected" as const, reason: "delivery_failed" as const, detail: "transport closed" })),
+      });
+      viewer.handleInput("\r");
+      for (const ch of "retry this") viewer.handleInput(ch);
+      viewer.handleInput("\r");
+      await Promise.resolve();
+
+      const output = viewer.render(W).join("\n");
+      expect(output).toContain("retry this");
+      expect(output).toContain("Steering rejected: delivery_failed — transport closed.");
+      expect(output).toContain("Enter send · Esc cancel");
+    });
+
+    it("ignores edits and Enter while submission is in flight", async () => {
+      let release!: (result: SteerResult) => void;
+      const onSteer = vi.fn(() => new Promise<SteerResult>((resolve) => { release = resolve; }));
+      const { viewer } = makeViewer({ onSteer });
+      viewer.handleInput("\r");
+      for (const ch of "first") viewer.handleInput(ch);
+      viewer.handleInput("\r");
+      for (const ch of " changed") viewer.handleInput(ch);
+      viewer.handleInput("\r");
+
+      expect(onSteer).toHaveBeenCalledTimes(1);
+      release({ status: "rejected", reason: "delivery_failed", detail: "try again" });
+      await Promise.resolve();
+      const output = viewer.render(W).join("\n");
+      expect(output).toContain("first");
+      expect(output).not.toContain("changed");
+    });
+
+    it("Esc dismisses an in-flight composer without admitting a replacement steer", async () => {
+      let release!: (result: SteerResult) => void;
+      const onSteer = vi.fn(() => new Promise<SteerResult>((resolve) => { release = resolve; }));
+      const { viewer } = makeViewer({ onSteer });
+      viewer.handleInput("\r");
+      for (const ch of "pending") viewer.handleInput(ch);
+      viewer.handleInput("\r");
+      viewer.handleInput("\x1b");
+      viewer.handleInput("\r");
+      for (const ch of "replacement") viewer.handleInput(ch);
+
+      expect(onSteer).toHaveBeenCalledTimes(1);
+      expect(viewer.render(W).join("\n")).not.toContain("replacement");
+      release({ status: "accepted" });
+      await Promise.resolve();
+      expect(viewer.render(W).join("\n")).not.toContain("Steering accepted.");
+
+      viewer.handleInput("\r");
+      for (const ch of "replacement") viewer.handleInput(ch);
+      expect(viewer.render(W).join("\n")).toContain("replacement");
     });
 
     it("Esc cancels the composer without sending", () => {

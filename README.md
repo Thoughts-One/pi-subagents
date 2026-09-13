@@ -14,10 +14,10 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Concurrent agents** — top-level foreground and background agents share one configurable concurrency limit (default 4). Excess agents queue. At most one write-class child runs per parent session
 - **Live widget UI** — persistent above-editor widget with animated spinners, live tool activity, token counts, and colored status icons. Configurable via `/agents → Settings → Widget`: `all` (every agent), `background` (default — hides foreground runs, which already render inline as the `Agent` tool result), or `off`
 - **FleetView** — Claude Code-style navigable list of `main` + every running subagent rendered below the editor (earliest-launched first). Press `↓` (or `←`) at an empty prompt to jump in, `↑`/`↓` to move the selection, `Enter` to open the selected agent's live, auto-updating conversation, `Esc` to return. Finished agents linger briefly before dropping out, and a viewer stays open through completion so you can read the final output. Toggle via `/agents → Settings → Fleet view`
-- **Conversation viewer** — select any agent in `/agents` to open a live-scrolling overlay of its full conversation (auto-follows new content, scroll up to pause). Steer a running agent inline by pressing `Enter` to open a composer, typing, then `Enter` to send (`Esc` or an empty submit returns) — the message appears as a user message and redirects the agent after its current tool. Stop a still-running agent by pressing `x` (then `x` again to confirm) — both work for background agents too
+- **Conversation viewer** — select any agent in `/agents` to open a live-scrolling overlay of its full conversation (auto-follows new content, scroll up to pause). Steer a running agent inline by pressing `Enter` to open a composer, typing, then `Enter` to submit (`Esc` or an empty submit returns). The footer reports whether delivery was accepted or rejected; rejected text stays in the composer for correction. Stop a still-running agent by pressing `x` (then `x` again to confirm) — both work for background agents too
 - **Custom agent types** — define agents in `.pi/agents/<name>.md` or `.agents/agents/<name>.md` (project) or globally, with YAML frontmatter: custom system prompts, model selection, thinking levels, tool restrictions
 - **Nested subagents** — opt-in, default-off delegation: a custom agent that sets `allowed_subagents` gets its own ownership-scoped `Agent`, `get_subagent_result`, and `steer_subagent` tools, depth-capped from the main session (default 2). It can control only its own children, they are stopped when it finishes, and their transcripts and token spend roll up to it. The allowlist is a privilege boundary — a child runs with its own tools, so pick it as carefully as `tools:` itself
-- **Mid-run steering** — inject messages into running agents to redirect their work without restarting
+- **Mid-run steering** — inject messages into running or queued agents to redirect their work without restarting, with explicit accepted, queued, or rejected delivery state
 - **Session resume** — pick up where an agent left off, preserving full conversation context
 - **Graceful turn limits** — agents get a "wrap up" warning before hard abort, producing clean partial results instead of cut-off output
 - **Case-insensitive agent types** — `"explore"`, `"Explore"`, `"EXPLORE"` all work. A type that doesn't resolve to exactly one *enabled* agent — unknown, disabled, or ambiguous between two agents differing only by case — falls back to general-purpose with a note, or is refused outright under [`fallbackSubagent: none`](#persistent-settings)
@@ -125,7 +125,7 @@ While subagents are running, a Claude Code-style navigable list renders **below*
                                                                                    ↓ 3 more
 ```
 
-The list is ordered earliest-launched first, and only shows agents you can actually open (pending/queued agents with no session yet appear once they start). At an **empty prompt**, press `↓` (or `←`) to move focus from the prompt into the list — the selected row is marked `●`, the rest `○`. `↑`/`↓` move the selection, `Enter` opens the selected agent's live conversation overlay (it auto-updates as the agent works), and `Esc` (or `↑` above `main`) returns to the prompt. Selecting `main` returns to the normal view. Inside the overlay, press `Enter` to steer the running agent — type a message and `Enter` to send it (`Esc` or an empty submit returns), and it redirects the agent the same way the `steer_subagent` tool does. A viewer stays open when its agent finishes so you can read the final output, and finished agents linger in the list for a few seconds before dropping out. Typing anything at a non-empty prompt behaves normally — the list only captures arrow keys when the prompt is empty. Disable it entirely via `/agents → Settings → Fleet view`.
+The list is ordered earliest-launched first, and only shows agents you can actually open (pending/queued agents with no session yet appear once they start). At an **empty prompt**, press `↓` (or `←`) to move focus from the prompt into the list — the selected row is marked `●`, the rest `○`. `↑`/`↓` move the selection, `Enter` opens the selected agent's live conversation overlay (it auto-updates as the agent works), and `Esc` (or `↑` above `main`) returns to the prompt. Selecting `main` returns to the normal view. Inside the overlay, press `Enter` to steer the running agent — type a message and `Enter` to submit it (`Esc` or an empty submit returns). The footer reports accepted delivery or rejection; a rejected message remains editable in the composer. A viewer stays open when its agent finishes so you can read the final output, and finished agents linger in the list for a few seconds before dropping out. Typing anything at a non-empty prompt behaves normally — the list only captures arrow keys when the prompt is empty. Disable it entirely via `/agents → Settings → Fleet view`.
 
 Individual agent results render Claude Code-style in the conversation:
 
@@ -336,11 +336,11 @@ Check status and retrieve results from a background agent.
 
 Cancelling a `wait: true` call (for example, with `Esc`) stops only the wait. The background agent keeps running, and its completion notification still arrives normally. If a stopped agent is still preserving its worktree, a non-waiting read reports that pending state without consuming the later completion notification.
 
-Terminal results remain retrievable from the active session branch after the live record is evicted, including after session resume or compaction. Retrieval never searches sibling branches.
+Terminal results remain retrievable from the active session branch after the live record is evicted, including after session resume or compaction. Retrieval never searches sibling branches. If appending that durable record fails, the foreground result, background notification, and live retrieval show `Persistence: failed — <detail>; result is live-only`; once that live record is evicted, retrieval remains unknown because no durable outcome exists.
 
 ### `steer_subagent`
 
-Send a steering message to a running agent. The message interrupts after the current tool execution.
+Send a steering message to a running or queued agent. The tool awaits delivery and reports `accepted`, volatile `queued`, or a rejected reason; only accepted delivery emits `subagents:steered`. A delivered message interrupts after the current tool execution.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -604,12 +604,12 @@ isolation: worktree
 
 The agent gets a full, isolated copy of the repository. On completion:
 - **No changes:** worktree is cleaned up automatically
-- **Changes made:** changes are committed to a new branch (`pi-agent-<id>`) and returned in the result
+- **Changes made:** changes are committed to a new branch (`pi-agent-<id>`) and returned with its canonical `repository`, `branch`, and verified `commit` tip
 - **Agent committed its own work:** the branch is created at the agent's HEAD, preserving its commits (uncommitted leftovers are committed on top first)
 
 The automatic preservation commit uses `--no-verify`, so local pre-commit hooks can't block it — the commit is local-only and never pushed, and pre-push/server-side hooks still apply.
 
-If worktree inspection or preservation fails, the temporary worktree is retained. The result reports its path and the Git failure. A stopped execution remains active for manager-level running and wait checks until preservation settles. The failed agent cannot be resumed while that preservation failure remains recorded. The OS can clean up temporary directories, so inspect or copy the retained worktree promptly.
+Before removal, preservation verifies that the worktree and target repository share one Git common directory and that the created branch points to the worktree HEAD. A `wrong_repository` or `branch_mismatch` result retains the path. If worktree inspection or preservation fails, the temporary worktree is retained. The result reports its path and the Git failure. A stopped execution remains active for manager-level running and wait checks until preservation settles. The failed agent cannot be resumed while that preservation failure remains recorded. The OS can clean up temporary directories, so inspect or copy the retained worktree promptly.
 
 If the worktree cannot be created (not a git repo, no commits, or `git worktree add` fails), the `Agent` tool returns a clear error instead of running unisolated. `isolation: "worktree"` is a strict role guarantee. Initialize git and commit at least once, or remove the role field.
 

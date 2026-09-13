@@ -38,7 +38,7 @@ function makePi(order: string[]) {
       emit: vi.fn((event: string) => order.push(`event:${event}`)),
       on: vi.fn(() => vi.fn()),
     },
-    appendEntry: vi.fn(() => order.push("persist")),
+    appendEntry: vi.fn((customType: string) => order.push(`persist:${customType}`)),
     sendMessage: vi.fn(),
   } as any;
   return { pi, tools, lifecycle };
@@ -116,7 +116,7 @@ describe("Plan result contract settlement", () => {
         result: "OUTCOME: COMPLETE\nPlan body without provenance.",
         error: expect.stringContaining("Result contract violation"),
       }));
-      expect(order.indexOf("event:subagents:failed")).toBeLessThan(order.indexOf("persist"));
+      expect(order.indexOf("event:subagents:failed")).toBeLessThan(order.indexOf("persist:subagents:record"));
       await lifecycle.get("session_shutdown")?.();
     });
   }
@@ -209,7 +209,7 @@ describe("Plan result contract settlement", () => {
       status: "error",
       result: "Plan body without receipt.",
     }));
-    expect(order.indexOf("event:subagents:failed")).toBeLessThan(order.indexOf("persist"));
+    expect(order.indexOf("event:subagents:failed")).toBeLessThan(order.indexOf("persist:subagents:record"));
     await lifecycle.get("session_shutdown")?.();
   });
 });
